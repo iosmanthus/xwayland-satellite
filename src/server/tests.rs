@@ -2992,6 +2992,83 @@ fn quick_destroy_window_with_serial() {
     );
 }
 
+impl Compositor {
+    /// A surface with a `size`x`size` buffer, not attached yet.
+    fn create_cursor_surface(&self, size: i32) -> (TestObject<WlBuffer>, TestObject<WlSurface>) {
+        let fd = unsafe { BorrowedFd::borrow_raw(0) };
+        let pool = TestObject::<WlShmPool>::from_request(
+            &self.shm.obj,
+            Req::<WlShm>::CreatePool { fd, size: 1024 },
+        );
+        let buffer = TestObject::<WlBuffer>::from_request(
+            &pool.obj,
+            Req::<WlShmPool>::CreateBuffer {
+                offset: 0,
+                width: size,
+                height: size,
+                stride: 1,
+                format: WEnum::Value(Format::Xrgb8888A8),
+            },
+        );
+        let surface = TestObject::<WlSurface>::from_request(
+            &self.compositor.obj,
+            Req::<WlCompositor>::CreateSurface {},
+        );
+        (buffer, surface)
+    }
+}
+
+// X clients load cursors at the logical size times the scale, so at 2x a 24 px
+// cursor arrives as a 48x48 buffer. It has to be shown at 24x24 logical, with
+// the hotspot scaled to match, or the compositor upscales it again.
+#[test]
+fn scaled_cursor() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output) = f.new_output(0, 0);
+    output.scale(2);
+    output.done();
+    f.run();
+    f.run();
+
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+
+    // Xwayland sets the cursor first, then attaches its image.
+    let (buffer, surface) = comp.create_cursor_surface(48);
+    f.run();
+    let id = f.testwl.last_created_surface_id().unwrap();
+    pointer.set_cursor(0, Some(&surface.obj), 20, 10);
+    surface.attach(Some(&buffer.obj), 0, 0);
+    surface.commit();
+    f.run();
+    f.run();
+
+    let cursor = f.testwl.cursor().expect("No cursor set");
+    assert_eq!(cursor.surface, Some(id));
+    assert_eq!((cursor.hotspot_x, cursor.hotspot_y), (10, 5));
+    let viewport = f.testwl.get_surface_data(id).unwrap().viewport.as_ref();
+    let viewport = viewport.expect("No viewport");
+    assert_eq!((viewport.width, viewport.height), (24, 24));
+
+    // An image that is already attached when the cursor is set.
+    let (buffer, surface) = comp.create_cursor_surface(96);
+    f.run();
+    let id = f.testwl.last_created_surface_id().unwrap();
+    surface.attach(Some(&buffer.obj), 0, 0);
+    surface.commit();
+    f.run();
+    pointer.set_cursor(0, Some(&surface.obj), 47, 47);
+    f.run();
+    f.run();
+
+    let cursor = f.testwl.cursor().expect("No cursor set");
+    assert_eq!(cursor.surface, Some(id));
+    assert_eq!((cursor.hotspot_x, cursor.hotspot_y), (24, 24));
+    let viewport = f.testwl.get_surface_data(id).unwrap().viewport.as_ref();
+    let viewport = viewport.expect("No viewport");
+    assert_eq!((viewport.width, viewport.height), (48, 48));
+}
+
 #[test]
 fn scaled_pointer_lock_position_hint() {
     let mut f = TestFixture::new_pre_connect(|testwl| {

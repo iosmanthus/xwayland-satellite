@@ -258,6 +258,14 @@ struct PointerState {
     locked: Option<LockedPointer>,
 }
 
+/// The last `wl_pointer.set_cursor` request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    pub surface: Option<SurfaceId>,
+    pub hotspot_x: i32,
+    pub hotspot_y: i32,
+}
+
 struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
     outputs: HashMap<WlOutput, Output>,
@@ -272,6 +280,7 @@ struct State {
     callbacks: Vec<WlCallback>,
     seat: Option<WlSeat>,
     pointer: Option<PointerState>,
+    cursor: Option<Cursor>,
     keyboard: Option<KeyboardState>,
     touch: Option<WlTouch>,
     tablet: Option<ZwpTabletV2>,
@@ -304,6 +313,7 @@ impl Default for State {
             callbacks: Vec::new(),
             seat: None,
             pointer: None,
+            cursor: None,
             keyboard: None,
             touch: None,
             tablet: None,
@@ -571,6 +581,10 @@ impl Server {
 
     pub fn last_created_surface_id(&self) -> Option<SurfaceId> {
         self.state.last_surface_id
+    }
+
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.state.cursor
     }
 
     pub fn created_surfaces(&self) -> &[SurfaceId] {
@@ -1447,7 +1461,17 @@ impl Dispatch<WlPointer, ()> for State {
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
-            wl_pointer::Request::SetCursor { surface, .. } => {
+            wl_pointer::Request::SetCursor {
+                surface,
+                hotspot_x,
+                hotspot_y,
+                ..
+            } => {
+                state.cursor = Some(Cursor {
+                    surface: surface.as_ref().map(SurfaceId::from),
+                    hotspot_x,
+                    hotspot_y,
+                });
                 if let Some(surface) = surface {
                     let data = state.surfaces.get_mut(&SurfaceId::from(&surface)).unwrap();
 
