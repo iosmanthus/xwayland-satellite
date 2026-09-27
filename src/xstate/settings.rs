@@ -38,7 +38,8 @@ impl XState {
                 data: &self.settings.as_data(),
             })
             .unwrap();
-        self.update_xft_dpi_resource(self.settings.xft_dpi());
+        let cursor_size = (self.cursor_size as f64 * scale.max(1.0)).round() as u32;
+        self.update_scaled_resources(self.settings.xft_dpi(), cursor_size);
     }
 }
 
