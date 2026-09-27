@@ -103,6 +103,14 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
                 if buffer.is_none() {
                     trace!("xwayland attached null buffer to {client:?}");
                 }
+                let size = buffer.as_ref().and_then(|b| {
+                    let entity: Entity = b.data().copied().unwrap();
+                    state
+                        .world
+                        .get::<&BufferSize>(entity)
+                        .ok()
+                        .map(|size| *size)
+                });
                 let buffer = buffer.as_ref().map(|b| {
                     let entity: Entity = b.data().copied().unwrap();
                     state
@@ -116,6 +124,14 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
                 } else {
                     let buffer = buffer.as_deref().cloned();
                     cmd.insert(*entity, (SurfaceAttach { buffer, x, y },));
+                }
+
+                if let Some(size) = size {
+                    if data.has::<CursorSurface>() {
+                        let viewport = data.get::<&WpViewport>().unwrap();
+                        set_cursor_viewport(&viewport, size, state.current_scale);
+                    }
+                    cmd.insert(*entity, (AttachedBufferSize(size),));
                 }
             }
             Request::<WlSurface>::DamageBuffer {
@@ -303,7 +319,9 @@ impl<S: X11Selection> Dispatch<WlShmPool, client::wl_shm_pool::WlShmPool> for In
                     entity,
                 );
                 let server = data_init.init(id, entity);
-                state.world.spawn_at(entity, (client, server));
+                state
+                    .world
+                    .spawn_at(entity, (client, server, BufferSize { width, height }));
             }
             Request::<WlShmPool>::Resize { size } => {
                 c_pool.resize(size);
@@ -341,6 +359,34 @@ impl<S: X11Selection> Dispatch<WlShm, ClientGlobalWrapper<client::wl_shm::WlShm>
     }
 }
 
+// Xwayland attaches cursor images at buffer scale 1, drawn at the size X clients
+// load them at: the logical cursor size times the scale X runs at (see
+// `Xcursor.size` in xstate/xresources.rs). Left alone, the compositor shows a
+// 48x48 image at 2x as 48x48 logical and upscales it; size the surface back to
+// logical pixels instead, and scale the hotspot, which is surface-local, with it.
+
+fn make_cursor_surface(world: &mut hecs::World, surface: Entity, scale: f64) {
+    world.insert_one(surface, CursorSurface).unwrap();
+    let (viewport, size) = world
+        .query_one_mut::<(&WpViewport, Option<&AttachedBufferSize>)>(surface)
+        .unwrap();
+    if let Some(AttachedBufferSize(size)) = size {
+        set_cursor_viewport(viewport, *size, scale);
+    }
+}
+
+fn set_cursor_viewport(viewport: &WpViewport, size: BufferSize, scale: f64) {
+    let width = (size.width as f64 / scale).ceil() as i32;
+    let height = (size.height as f64 / scale).ceil() as i32;
+    if width > 0 && height > 0 {
+        viewport.set_destination(width, height);
+    }
+}
+
+fn scale_hotspot(hotspot: i32, scale: f64) -> i32 {
+    (hotspot as f64 / scale).round() as i32
+}
+
 impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
@@ -358,21 +404,28 @@ impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
                 hotspot_y,
                 surface,
             } => {
+                let scale = state.current_scale;
+                let surface = surface.and_then(|s| s.data().copied());
+                if let Some(surface) = surface {
+                    make_cursor_surface(&mut state.world, surface, scale);
+                }
+
                 let c_pointer = state
                     .world
                     .get::<&client::wl_pointer::WlPointer>(*entity)
                     .unwrap();
-
-                let c_surface = surface.and_then(|s| {
-                    let e = s.data().copied()?;
-                    Some(
-                        state
-                            .world
-                            .get::<&client::wl_surface::WlSurface>(e)
-                            .unwrap(),
-                    )
+                let c_surface = surface.map(|e| {
+                    state
+                        .world
+                        .get::<&client::wl_surface::WlSurface>(e)
+                        .unwrap()
                 });
-                c_pointer.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
+                c_pointer.set_cursor(
+                    serial,
+                    c_surface.as_deref(),
+                    scale_hotspot(hotspot_x, scale),
+                    scale_hotspot(hotspot_y, scale),
+                );
             }
             Request::<WlPointer>::Release => {
                 let (client, _) = state
@@ -634,7 +687,9 @@ impl<S: X11Selection>
                     entity,
                 );
                 let server = data_init.init(buffer_id, entity);
-                state.world.spawn_at(entity, (client, server));
+                state
+                    .world
+                    .spawn_at(entity, (client, server, BufferSize { width, height }));
             }
             Add {
                 fd,
@@ -728,7 +783,7 @@ impl<S: X11Selection> Dispatch<WlDrmServer, Entity> for InnerServerState<S> {
             &QueueHandle<MyWorld>,
         ) -> client::wl_buffer::WlBuffer;
 
-        let mut bufs: Option<(Box<DrmFn>, wayland_server::New<WlBuffer>)> = None;
+        let mut bufs: Option<(Box<DrmFn>, wayland_server::New<WlBuffer>, BufferSize)> = None;
         match request {
             CreateBuffer {
                 id,
@@ -743,6 +798,7 @@ impl<S: X11Selection> Dispatch<WlDrmServer, Entity> for InnerServerState<S> {
                         drm.create_buffer(name, width, height, stride, format, qh, key)
                     }),
                     id,
+                    BufferSize { width, height },
                 ));
             }
             CreatePlanarBuffer {
@@ -766,6 +822,7 @@ impl<S: X11Selection> Dispatch<WlDrmServer, Entity> for InnerServerState<S> {
                         )
                     }),
                     id,
+                    BufferSize { width, height },
                 ));
             }
             CreatePrimeBuffer {
@@ -799,6 +856,7 @@ impl<S: X11Selection> Dispatch<WlDrmServer, Entity> for InnerServerState<S> {
                         )
                     }),
                     id,
+                    BufferSize { width, height },
                 ));
             }
             Authenticate { id } => {
@@ -811,7 +869,7 @@ impl<S: X11Selection> Dispatch<WlDrmServer, Entity> for InnerServerState<S> {
             _ => unreachable!(),
         }
 
-        if let Some((buf_create, id)) = bufs {
+        if let Some((buf_create, id, size)) = bufs {
             let new_entity = state.world.reserve_entity();
             let client = {
                 let drm_client = state
@@ -821,7 +879,7 @@ impl<S: X11Selection> Dispatch<WlDrmServer, Entity> for InnerServerState<S> {
                 buf_create(&drm_client, new_entity, &state.qh)
             };
             let server = data_init.init(id, new_entity);
-            state.world.spawn_at(new_entity, (client, server));
+            state.world.spawn_at(new_entity, (client, server, size));
         }
     }
 }
@@ -1154,7 +1212,12 @@ impl<S: X11Selection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, En
                         .get::<&client::wl_surface::WlSurface>(key)
                         .unwrap()
                 });
-                client.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
+                client.set_cursor(
+                    serial,
+                    c_surface.as_deref(),
+                    scale_hotspot(hotspot_x, state.current_scale),
+                    scale_hotspot(hotspot_y, state.current_scale),
+                );
             }
             s_tablet::zwp_tablet_tool_v2::Request::Destroy => {
                 client.destroy();
