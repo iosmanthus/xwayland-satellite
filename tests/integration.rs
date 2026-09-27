@@ -2193,6 +2193,16 @@ fn xsettings_fractional_scale() {
     );
 }
 
+/// The logical cursor size satellite scales `Xcursor.size` from: its own
+/// XCURSOR_SIZE, or 24.
+fn logical_cursor_size() -> f64 {
+    std::env::var("XCURSOR_SIZE")
+        .ok()
+        .and_then(|size| size.parse::<u32>().ok())
+        .filter(|size| *size > 0)
+        .unwrap_or(24) as f64
+}
+
 #[test]
 fn resource_manager_scale() {
     let mut f = Fixture::new_preset(|testwl| {
@@ -2202,7 +2212,11 @@ fn resource_manager_scale() {
     f.testwl.enable_xdg_output_manager();
     let output = f.create_output(0, 0);
 
-    assert_eq!(connection.get_resource_manager(), b"Xft.dpi:\t96\n");
+    let cursor = logical_cursor_size();
+    assert_eq!(
+        connection.get_resource_manager(),
+        format!("Xft.dpi:\t96\nXcursor.size:\t{cursor}\n").as_bytes()
+    );
     connection.set_property(
         connection.root,
         x::ATOM_STRING,
@@ -2220,7 +2234,11 @@ fn resource_manager_scale() {
     f.wait_and_dispatch();
     assert_eq!(
         connection.get_resource_manager(),
-        b"Xcursor.theme:\tAdwaita\nXft.dpi:\t144\n"
+        format!(
+            "Xcursor.theme:\tAdwaita\nXft.dpi:\t144\nXcursor.size:\t{}\n",
+            (cursor * 1.5).round()
+        )
+        .as_bytes()
     );
 
     let data = f.testwl.get_surface_data(surface).unwrap();
@@ -2229,7 +2247,11 @@ fn resource_manager_scale() {
     f.wait_and_dispatch();
     assert_eq!(
         connection.get_resource_manager(),
-        b"Xcursor.theme:\tAdwaita\nXft.dpi:\t240\n"
+        format!(
+            "Xcursor.theme:\tAdwaita\nXft.dpi:\t240\nXcursor.size:\t{}\n",
+            (cursor * 2.5).round()
+        )
+        .as_bytes()
     );
 }
 
