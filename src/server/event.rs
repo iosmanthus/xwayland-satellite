@@ -465,9 +465,12 @@ impl SurfaceEvents {
 
                 if first_configure {
                     let window_data = data.get::<&WindowData>().unwrap();
-                    // Notifications do not take focus from what the user is in.
+                    // Notifications do not take focus from what the user is in, but panels
+                    // (transient for another window) do: Feishu closes its meeting panels
+                    // a moment after opening them unless they get focus.
                     if window_data.attrs.require_wm_focus()
-                        && window_data.attrs.role != WindowRole::Notification
+                        && (window_data.attrs.role != WindowRole::Notification
+                            || window_data.attrs.transient_for.is_some())
                     {
                         let window = *data.get::<&x::Window>().unwrap();
                         state.inner.to_focus = Some(FocusData {
@@ -865,8 +868,24 @@ impl Event for client::wl_pointer::Event {
                     }
                 }
 
+                let pressed_overlay = match current_surface {
+                    CurrentSurface::Xwayland(entity)
+                        if button_state
+                            == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
+                            && state
+                                .world
+                                .satisfies::<&overlay::Placement>(*entity)
+                                .unwrap_or(false) =>
+                    {
+                        Some(*entity)
+                    }
+                    _ => None,
+                };
                 server.button(serial, time, button, convert_wenum(button_state));
                 drop(query);
+                if pressed_overlay.is_some() {
+                    state.overlay_pressed = pressed_overlay;
+                }
                 cmd.run_on(&mut state.world);
             }
             _ => {
@@ -923,6 +942,14 @@ impl Event for client::wl_keyboard::Event {
                 surface,
                 keys,
             } => {
+                if surface.data::<overlay::OverlayMarker>().is_some() {
+                    drop(keyboard);
+                    let seat = data.get::<&client::wl_seat::WlSeat>().as_deref().cloned();
+                    if state.overlay_keyboard_enter(target, serial, keys) {
+                        state.last_kb_serial = seat.map(|seat| (seat, serial));
+                    }
+                    return;
+                }
                 let mut query = surface.data().copied().and_then(|key| {
                     state
                         .world
@@ -951,6 +978,11 @@ impl Event for client::wl_keyboard::Event {
                 keyboard.enter(serial, surface, keys);
             }
             client::wl_keyboard::Event::Leave { serial, surface } => {
+                if surface.data::<overlay::OverlayMarker>().is_some() {
+                    drop(keyboard);
+                    state.overlay_keyboard_leave(target, serial);
+                    return;
+                }
                 if !surface.is_alive() {
                     return;
                 }

@@ -20,10 +20,10 @@ use hecs::{Entity, World};
 use log::{debug, warn};
 use smithay_client_toolkit::registry::SimpleGlobal;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
-use wayland_client::QueueHandle;
 use wayland_client::protocol::{
     wl_compositor::WlCompositor, wl_output::WlOutput, wl_shm, wl_surface::WlSurface,
 };
+use wayland_client::{Proxy, QueueHandle};
 use wayland_protocols::xdg::shell::client::{
     xdg_positioner::{Anchor as PopupAnchor, ConstraintAdjustment, Gravity},
     xdg_surface::XdgSurface,
@@ -102,6 +102,15 @@ impl Overlay {
             self.buffer = Some(buffer);
         }
         self.surface.commit();
+        if !self.mapped && self.layer.version() >= 4 {
+            // Keys go to a notification window its client wants typed into (Feishu's
+            // danmaku input) through its overlay, when it is clicked. Not on the commit that
+            // maps the overlay: the compositor gives an overlay that maps taking keys on
+            // demand keyboard focus.
+            self.layer
+                .set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+            self.surface.commit();
+        }
         self.mapped = true;
     }
 
@@ -489,6 +498,89 @@ impl<S: X11Selection> InnerServerState<S> {
             });
         }
         bounds.map(|(x, y, x1, y1)| (x.into(), y.into(), x1.into(), y1.into()))
+    }
+}
+
+/// The notification window keyboard focus on an overlay goes to: a component of the
+/// keyboard's entity.
+pub(super) struct OverlayKeyboard(Entity);
+
+impl<S: X11Selection> InnerServerState<S> {
+    /// Gives keyboard focus on an overlay to the notification window the pointer was last
+    /// pressed in: the surface with keyboard focus is Xwayland's, and X gives keys to the
+    /// window with input focus.
+    pub(super) fn overlay_keyboard_enter(
+        &mut self,
+        keyboard: Entity,
+        serial: u32,
+        keys: Vec<u8>,
+    ) -> bool {
+        let Some(entity) = self.overlay_pressed else {
+            return false;
+        };
+        let Ok(mut query) = self.world.query_one::<(
+            &x::Window,
+            &server::wl_surface::WlSurface,
+            &WindowData,
+            &Placement,
+        )>(entity) else {
+            return false;
+        };
+        let Some((window, surface, data, _)) = query.get() else {
+            return false;
+        };
+        let window = *window;
+        let has_take_focus = data.attrs.has_take_focus;
+        let Ok(server) = self.world.get::<&server::wl_keyboard::WlKeyboard>(keyboard) else {
+            return false;
+        };
+        server.enter(serial, surface, keys);
+        drop(server);
+        drop(query);
+        self.to_focus = Some(super::FocusData {
+            window,
+            output_name: None,
+            is_popup: true,
+            has_take_focus,
+        });
+        self.world
+            .insert_one(keyboard, OverlayKeyboard(entity))
+            .unwrap();
+        true
+    }
+
+    /// Takes keyboard focus on an overlay from the notification window it went to.
+    pub(super) fn overlay_keyboard_leave(&mut self, keyboard: Entity, serial: u32) {
+        let Ok(OverlayKeyboard(entity)) = self.world.remove_one::<OverlayKeyboard>(keyboard) else {
+            return;
+        };
+        let server = self.world.get::<&server::wl_keyboard::WlKeyboard>(keyboard);
+        let surface = self.world.get::<&server::wl_surface::WlSurface>(entity);
+        if let (Ok(server), Ok(surface)) = (server, surface) {
+            server.leave(serial, &surface);
+        }
+        self.unfocus = true;
+    }
+
+    /// Takes keyboard focus from a notification window going away.
+    pub(super) fn overlay_window_unmapped(&mut self, entity: Entity) {
+        if self.overlay_pressed == Some(entity) {
+            self.overlay_pressed = None;
+        }
+        let keyboards: Vec<Entity> = self
+            .world
+            .query::<&OverlayKeyboard>()
+            .iter()
+            .filter(|(_, focus)| focus.0 == entity)
+            .map(|(keyboard, _)| keyboard)
+            .collect();
+        let serial = self
+            .last_kb_serial
+            .as_ref()
+            .map_or(0, |(_, serial)| *serial);
+        for keyboard in keyboards {
+            self.overlay_keyboard_leave(keyboard, serial);
+        }
     }
 }
 
