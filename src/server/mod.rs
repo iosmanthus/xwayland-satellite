@@ -519,6 +519,8 @@ pub struct InnerServerState<S: X11Selection> {
     display: client::wl_display::WlDisplay,
     /// The notification window the pointer was last pressed in, to give keys to.
     overlay_pressed: Option<Entity>,
+    /// The notification window with focus, whose input method windows go over it.
+    focused_overlay: Option<Entity>,
     selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -648,6 +650,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             layer_shell,
             display,
             overlay_pressed: None,
+            focused_overlay: None,
             world,
         };
         Self {
@@ -1483,6 +1486,12 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             let window_data = data.get::<&WindowData>().unwrap();
             if window_data.attrs.role.is_popup() {
                 popup_for = self.last_hovered.or(self.last_focused_toplevel);
+                // Over a notification window with focus (an input method's candidates for
+                // it, say), on its overlay: as a popup of a window below it, it would be
+                // hidden.
+                if self.focused_overlay.is_some_and(|e| self.world.contains(e)) {
+                    overlay_on = self.overlay_output_for(window_data.attrs.dims);
+                }
             }
             if window_data.attrs.role == WindowRole::Notification {
                 overlay_on = self.overlay_output_for(window_data.attrs.dims);
