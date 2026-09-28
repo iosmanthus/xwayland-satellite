@@ -215,14 +215,12 @@ impl SurfaceEvents {
                     let Some(dimensions) = output_data.get::<&OutputDimensions>() else {
                         return;
                     };
-                    win_data.update_output_offset(
-                        *window,
-                        WindowOutputOffset {
-                            x: dimensions.x - state.global_output_offset.x.value,
-                            y: dimensions.y - state.global_output_offset.y.value,
-                        },
-                        connection,
+                    let (x, y) = state.global_output_offset.x_origin(
+                        dimensions.x,
+                        dimensions.y,
+                        state.current_scale,
                     );
+                    win_data.update_output_offset(*window, WindowOutputOffset { x, y }, connection);
                     if state.last_focused_toplevel == Some(*window) {
                         let output = get_output_name(Some(&on_output), &state.world);
                         debug!("focused window changed outputs - resetting primary output");
@@ -1161,6 +1159,7 @@ fn update_output_offset(
     update_window_output_offsets(
         output,
         &state.global_output_offset,
+        state.current_scale,
         &state.world,
         connection,
     );
@@ -1169,6 +1168,7 @@ fn update_output_offset(
 fn update_window_output_offsets(
     output: Entity,
     global_output_offset: &GlobalOutputOffset,
+    scale: f64,
     world: &World,
     connection: &mut impl XConnection,
 ) {
@@ -1181,20 +1181,15 @@ fn update_window_output_offsets(
         .into_iter()
         .filter(|(_, (_, _, on_output))| on_output.0 == output)
     {
-        data.update_output_offset(
-            *window,
-            WindowOutputOffset {
-                x: dimensions.x - global_output_offset.x.value,
-                y: dimensions.y - global_output_offset.y.value,
-            },
-            connection,
-        );
+        let (x, y) = global_output_offset.x_origin(dimensions.x, dimensions.y, scale);
+        data.update_output_offset(*window, WindowOutputOffset { x, y }, connection);
     }
 }
 
 pub(super) fn update_global_output_offset(
     output: Entity,
     global_output_offset: &GlobalOutputOffset,
+    scale: f64,
     world: &World,
     connection: &mut impl XConnection,
 ) {
@@ -1204,8 +1199,7 @@ pub(super) fn update_global_output_offset(
         return;
     };
 
-    let x = dimensions.x - global_output_offset.x.value;
-    let y = dimensions.y - global_output_offset.y.value;
+    let (x, y) = global_output_offset.x_origin(dimensions.x, dimensions.y, scale);
 
     match &dimensions.source {
         OutputDimensionsSource::Wl {
@@ -1238,7 +1232,7 @@ pub(super) fn update_global_output_offset(
     server.done();
     drop(query);
 
-    update_window_output_offsets(output, global_output_offset, world, connection);
+    update_window_output_offsets(output, global_output_offset, scale, world, connection);
 }
 
 #[derive(Debug)]
@@ -1300,7 +1294,10 @@ impl OutputEvent {
                     y,
                     state,
                 );
-                let global_output_offset = state.global_output_offset;
+                let (origin_x, origin_y) =
+                    state
+                        .global_output_offset
+                        .x_origin(x, y, state.current_scale);
 
                 let Ok((output, dimensions, xdg)) = state.world.query_one_mut::<(
                     &WlOutput,
@@ -1311,8 +1308,8 @@ impl OutputEvent {
                 };
 
                 output.geometry(
-                    x - global_output_offset.x.value,
-                    y - global_output_offset.y.value,
+                    origin_x,
+                    origin_y,
                     physical_width,
                     physical_height,
                     convert_wenum(subpixel),
@@ -1404,14 +1401,14 @@ impl OutputEvent {
             Event::LogicalPosition { x, y } => {
                 update_output_offset(target, OutputDimensionsSource::Xdg, x, y, state);
                 if !state.global_offset_updated {
+                    let (x, y) = state
+                        .global_output_offset
+                        .x_origin(x, y, state.current_scale);
                     state
                         .world
                         .get::<&XdgOutputServer>(target)
                         .unwrap()
-                        .logical_position(
-                            x - state.global_output_offset.x.value,
-                            y - state.global_output_offset.y.value,
-                        );
+                        .logical_position(x, y);
                 }
             }
             Event::LogicalSize { .. } => {
