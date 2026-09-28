@@ -516,6 +516,7 @@ pub struct InnerServerState<S: X11Selection> {
     fractional_scale: Option<WpFractionalScaleManagerV1>,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
     layer_shell: Option<ZwlrLayerShellV1>,
+    display: client::wl_display::WlDisplay,
     selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -539,6 +540,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
         };
 
         let (global_list, queue) = registry_queue_init::<MyWorld>(&connection).unwrap();
+        let display = connection.display();
         let qh = queue.handle();
 
         let xdg_wm_base = global_list
@@ -642,6 +644,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             current_scale: 1.0,
             decoration_manager,
             layer_shell,
+            display,
             world,
         };
         Self {
