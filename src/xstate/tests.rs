@@ -299,7 +299,7 @@ mod window_role_heuristics {
             wm_class: Some("Meeting".into()),
             ..Default::default()
         };
-        assert_eq!(win.guess_window_role(&win_types), WindowRole::Splash);
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Notification);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/294

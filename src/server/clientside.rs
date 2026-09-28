@@ -1,4 +1,5 @@
 use super::decoration::DecorationMarker;
+use super::overlay::OverlayMarker;
 
 use super::{GlobalName, ObjectEvent};
 use hecs::{Entity, World};
@@ -87,6 +88,9 @@ use wayland_protocols::{
             zxdg_output_manager_v1::ZxdgOutputManagerV1, zxdg_output_v1::ZxdgOutputV1 as XdgOutput,
         },
     },
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1::ZwlrLayerShellV1, zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
 };
 use wayland_server::protocol as server;
 use wl_drm::client::wl_drm::WlDrm;
@@ -196,6 +200,7 @@ delegate_noop!(MyWorld: WlSubsurface);
 delegate_noop!(MyWorld: WpLinuxDrmSyncobjManagerV1);
 delegate_noop!(MyWorld: WpLinuxDrmSyncobjSurfaceV1);
 delegate_noop!(MyWorld: WpLinuxDrmSyncobjTimelineV1);
+delegate_noop!(MyWorld: ZwlrLayerShellV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for MyWorld {
     fn event(
@@ -268,6 +273,18 @@ impl Dispatch<WlSurface, DecorationMarker> for MyWorld {
     }
 }
 
+impl Dispatch<WlSurface, OverlayMarker> for MyWorld {
+    fn event(
+        _: &mut Self,
+        _: &WlSurface,
+        _: <WlSurface as Proxy>::Event,
+        _: &OverlayMarker,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 macro_rules! push_events {
     ($type:ident) => {
         impl Dispatch<$type, Entity> for MyWorld {
@@ -303,6 +320,7 @@ push_events!(ZwpConfinedPointerV1);
 push_events!(ZwpLockedPointerV1);
 push_events!(WpFractionalScaleV1);
 push_events!(ZxdgToplevelDecorationV1);
+push_events!(ZwlrLayerSurfaceV1);
 
 pub(crate) struct LateInitObjectKey<P: Proxy> {
     key: OnceLock<Entity>,
