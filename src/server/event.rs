@@ -473,6 +473,9 @@ impl SurfaceEvents {
                     } else {
                         attrs.require_wm_focus()
                     };
+                    if focus && attrs.role == WindowRole::Notification {
+                        state.inner.focused_overlay = Some(target);
+                    }
                     if focus {
                         let window = *data.get::<&x::Window>().unwrap();
                         state.inner.to_focus = Some(FocusData {
@@ -969,6 +972,7 @@ impl Event for client::wl_keyboard::Event {
                     serial,
                 ));
                 let output_name = get_output_name(output, &state.world);
+                state.focused_overlay = None;
                 let window_data = data.get::<&WindowData>();
                 let has_take_focus = window_data.as_ref().is_some_and(|d| d.attrs.has_take_focus);
                 state.to_focus = Some(FocusData {
