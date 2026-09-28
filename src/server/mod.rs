@@ -2,6 +2,7 @@ mod clientside;
 mod decoration;
 mod dispatch;
 mod event;
+mod overlay;
 pub(crate) mod selection;
 #[cfg(test)]
 mod tests;
@@ -63,6 +64,9 @@ use wayland_protocols::{
         xdg_output::zv1::server::zxdg_output_manager_v1::ZxdgOutputManagerV1,
     },
     xwayland::shell::v1::server::xwayland_shell_v1::XwaylandShellV1,
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1::ZwlrLayerShellV1, zwlr_layer_surface_v1,
 };
 use wayland_server::protocol::wl_seat::WlSeat;
 use wayland_server::{
@@ -351,7 +355,8 @@ enum ObjectEvent {
     TabletTool(zwp_tablet_tool_v2::Event),
     TabletPadGroup(zwp_tablet_pad_group_v2::Event),
     TabletPadRing(zwp_tablet_pad_ring_v2::Event),
-    TabletPadStrip(zwp_tablet_pad_strip_v2::Event)
+    TabletPadStrip(zwp_tablet_pad_strip_v2::Event),
+    Overlay(zwlr_layer_surface_v1::Event)
 }
 }
 
@@ -497,6 +502,7 @@ pub struct InnerServerState<S: X11Selection> {
     viewporter: WpViewporter,
     fractional_scale: Option<WpFractionalScaleManagerV1>,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
+    layer_shell: Option<ZwlrLayerShellV1>,
     selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -567,6 +573,13 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             .bind::<ZxdgDecorationManagerV1, _, _>(&qh, 1..=1, ())
             .ok();
 
+        let layer_shell = global_list
+            .bind::<ZwlrLayerShellV1, _, _>(&qh, 1..=4, ())
+            .inspect_err(|e| {
+                warn!("Couldn't bind wlr layer shell: {e}. Notification windows will not be placed where their clients put them.")
+            })
+            .ok();
+
         let selection_states = selection::SelectionStates::new(&global_list, &qh);
 
         dh.create_global::<InnerServerState<S>, XwaylandShellV1, _>(1, ());
@@ -615,6 +628,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             new_scale: None,
             current_scale: 1.0,
             decoration_manager,
+            layer_shell,
             world,
         };
         Self {
@@ -865,6 +879,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         for (entity, name) in query.iter() {
             if *name == global {
                 self.updated_outputs.push(*entity);
+                self.remove_overlay(*entity);
                 self.world
                     .remove::<(OutputScaleFactor, OutputDimensions)>(*entity)
                     .unwrap();
@@ -1044,7 +1059,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             let mut query = data.query::<(&SurfaceRole, &SurfaceScaleFactor)>();
             // A fixed-size window keeps its size whatever it hints.
             if let Some((SurfaceRole::Toplevel(Some(data)), scale_factor)) = query.get()
-                && win.attrs.role != WindowRole::Splash
+                && !win.attrs.role.is_fixed_size()
             {
                 event::update_size_hints(data, &hints, scale_factor.0);
             }
@@ -1088,17 +1103,17 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     pub fn can_change_position(&self, window: x::Window) -> bool {
-        let Some(win) = self
+        let Some(data) = self
             .windows
             .get(&window)
             .copied()
             .and_then(|id| self.world.entity(id).ok())
-            .map(|data| data.get::<&WindowData>().unwrap())
         else {
             return true;
         };
+        let win = data.get::<&WindowData>().unwrap();
 
-        !win.mapped || win.attrs.role.is_popup()
+        !win.mapped || win.attrs.role.is_popup() || overlay::is_overlay_popup(&win, data)
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -1121,7 +1136,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         if dims == win.attrs.dims {
             return;
-        } else if win.attrs.role.is_popup() {
+        } else if win.attrs.role.is_popup() || overlay::is_overlay_popup(&win, data) {
             win.attrs.dims = dims;
         }
 
@@ -1423,6 +1438,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     fn create_role_window(&mut self, window: x::Window, entity: Entity) -> bool {
         let xdg_surface;
         let mut popup_for = None;
+        let mut overlay_on = None;
         let mut fullscreen = false;
         let splash;
 
@@ -1438,19 +1454,26 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             if window_data.attrs.role.is_popup() {
                 popup_for = self.last_hovered.or(self.last_focused_toplevel);
             }
-            splash = window_data.attrs.role == WindowRole::Splash;
+            if window_data.attrs.role == WindowRole::Notification {
+                overlay_on = self.overlay_output_for(window_data.attrs.dims);
+            }
+            splash = window_data.attrs.role.is_fixed_size();
 
             let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
             for (_, dimensions) in self.world.query::<&OutputDimensions>().iter() {
                 if dimensions.width == width as i32 && dimensions.height == height as i32 {
                     fullscreen = true;
                     popup_for = None;
+                    overlay_on = None;
                     break;
                 }
             }
         }
 
-        let (role, is_toplevel) = if let Some(parent) = popup_for {
+        let (role, is_toplevel) = if let Some(output) = overlay_on {
+            let data = self.create_overlay_popup(entity, xdg_surface, output);
+            (SurfaceRole::Popup(Some(data)), false)
+        } else if let Some(parent) = popup_for {
             let data = self.create_popup(entity, xdg_surface, parent);
             (SurfaceRole::Popup(Some(data)), false)
         } else {

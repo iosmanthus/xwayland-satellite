@@ -822,7 +822,10 @@ impl TestFixture<FakeXConnection> {
                 .unwrap()
                 .xdg()
                 .surface;
-            assert_eq!(surface_data.popup().parent.id(), parent_xdg.id());
+            assert_eq!(
+                surface_data.popup().parent.as_ref().map(|p| p.id()),
+                Some(parent_xdg.id())
+            );
 
             let pos = &surface_data.popup().positioner_state;
             if check_size_and_pos {
@@ -1513,6 +1516,211 @@ fn splash_window_fixed_size_scaled() {
     fixed(&f.testwl, 702, 42);
 }
 
+/// Adds a 3840x2160 output at 2x at `x`, `y` (logical), and configures its overlay.
+fn new_overlay_output(
+    f: &mut TestFixture<FakeXConnection>,
+    x: i32,
+    y: i32,
+) -> (
+    wayland_server::protocol::wl_output::WlOutput,
+    testwl::SurfaceId,
+) {
+    let before = f.testwl.layer_surfaces();
+    let (_, output) = f.new_output(x, y);
+    output.mode(
+        wayland_server::protocol::wl_output::Mode::Current,
+        3840,
+        2160,
+        0,
+    );
+    output.scale(2);
+    output.done();
+    f.run();
+    f.run();
+    let overlay = f
+        .testwl
+        .layer_surfaces()
+        .into_iter()
+        .find(|id| !before.contains(id))
+        .expect("output has no overlay");
+    f.testwl.configure_layer_surface(overlay);
+    f.run();
+    f.run();
+    (output, overlay)
+}
+
+fn new_notification(
+    f: &mut TestFixture<FakeXConnection>,
+    comp: &Compositor,
+    window: Window,
+    dims: WindowDims,
+) -> testwl::SurfaceId {
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: false,
+        dims,
+        fullscreen: false,
+    };
+    f.new_window(window, false, data);
+    f.satellite
+        .set_window_role(window, crate::xstate::WindowRole::Notification);
+    f.map_window(comp, window, &surface.obj, &buffer);
+    f.run();
+    f.check_new_surface()
+}
+
+// Each output gets an overlay: one transparent pixel at its corner, above
+// everything and taking no input, for notification windows to be popups of.
+#[test]
+fn output_overlay() {
+    use wayland_protocols_wlr::layer_shell::v1::server::{
+        zwlr_layer_shell_v1::Layer,
+        zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity},
+    };
+
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let _comp = f.compositor();
+    let (output, overlay) = new_overlay_output(&mut f, 0, 0);
+
+    let data = f.testwl.get_surface_data(overlay).unwrap();
+    let layer = data.layer();
+    assert_eq!(layer.output.as_ref(), Some(&output));
+    assert_eq!(layer.layer, Layer::Overlay);
+    assert_eq!(layer.size, testwl::Vec2 { x: 1, y: 1 });
+    assert_eq!(layer.anchor, Anchor::Top | Anchor::Left);
+    assert_eq!(layer.exclusive_zone, -1);
+    assert_eq!(layer.keyboard_interactivity, KeyboardInteractivity::None);
+    assert!(layer.last_configure_serial.is_some());
+    assert_eq!(layer.acked_serial, layer.last_configure_serial);
+    assert!(data.buffer.is_some());
+}
+
+// An output's overlay goes with it.
+#[test]
+fn output_overlay_removed_with_output() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let _comp = f.compositor();
+    let (output, overlay) = new_overlay_output(&mut f, 0, 0);
+
+    f.remove_output(output);
+    f.run();
+    assert!(f.testwl.get_surface_data(overlay).is_none());
+    assert!(f.testwl.layer_surfaces().is_empty());
+}
+
+// A notification window (a video call's control bar) is placed where its
+// client puts it, and follows it as it moves (dragged by a handle it draws).
+#[test]
+fn notification_window_overlay_popup() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_, overlay) = new_overlay_output(&mut f, 0, 0);
+
+    let window = Window::new(1);
+    let dims = WindowDims {
+        x: 1650,
+        y: 2020,
+        width: 538,
+        height: 56,
+    };
+    let id = new_notification(&mut f, &comp, window, dims);
+
+    let popup = f.testwl.get_surface_data(id).unwrap().popup();
+    assert_eq!(popup.parent, None);
+    assert_eq!(popup.layer_parent, Some(overlay));
+    let pos = &popup.positioner_state;
+    assert_eq!(pos.offset, testwl::Vec2 { x: 825, y: 1010 });
+    assert_eq!(pos.size, Some(testwl::Vec2 { x: 269, y: 28 }));
+    assert_eq!(
+        pos.anchor_rect,
+        Some(testwl::Rect {
+            size: testwl::Vec2 { x: 1, y: 1 },
+            offset: testwl::Vec2 { x: 0, y: 0 },
+        })
+    );
+
+    f.testwl.configure_popup(id);
+    f.run();
+    assert_eq!(f.connection().window(window).dims, dims);
+    // Notifications do not take focus from the window the user is in.
+    assert_eq!(f.connection().focused_window, None);
+    assert!(f.satellite.can_change_position(window));
+
+    let moved = WindowDims {
+        x: 1000,
+        y: 1800,
+        ..dims
+    };
+    f.reconfigure_window(window, moved, false);
+    f.run();
+    f.run();
+    let pos = &f
+        .testwl
+        .get_surface_data(id)
+        .unwrap()
+        .popup()
+        .positioner_state;
+    assert_eq!(pos.offset, testwl::Vec2 { x: 500, y: 900 });
+    assert_eq!(f.connection().window(window).dims, moved);
+}
+
+// A notification window goes on the overlay of the output it is on in X.
+#[test]
+fn notification_window_second_output() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (_, right) = new_overlay_output(&mut f, 1920, 0);
+
+    let window = Window::new(1);
+    let dims = WindowDims {
+        x: 3840 + 1650,
+        y: 2020,
+        width: 538,
+        height: 56,
+    };
+    let id = new_notification(&mut f, &comp, window, dims);
+
+    let popup = f.testwl.get_surface_data(id).unwrap().popup();
+    assert_eq!(popup.layer_parent, Some(right));
+    assert_eq!(
+        popup.positioner_state.offset,
+        testwl::Vec2 { x: 825, y: 1010 }
+    );
+
+    f.testwl.configure_popup(id);
+    f.run();
+    assert_eq!(f.connection().window(window).dims, dims);
+}
+
+// Without wlr-layer-shell, a notification window is a toplevel of its size.
+#[test]
+fn notification_window_without_layer_shell() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output) = f.new_output(0, 0);
+    output.scale(2);
+    output.done();
+    f.run();
+    f.run();
+
+    let window = Window::new(1);
+    let dims = WindowDims {
+        x: 0,
+        y: 0,
+        width: 538,
+        height: 56,
+    };
+    let id = new_notification(&mut f, &comp, window, dims);
+    f.testwl.move_surface_to_output(id, &output);
+    f.run();
+    f.run();
+
+    let toplevel = f.testwl.get_surface_data(id).unwrap().toplevel();
+    let size = Some(testwl::Vec2 { x: 269, y: 28 });
+    assert_eq!((toplevel.min_size, toplevel.max_size), (size, size));
+    assert!(!f.satellite.can_change_position(window));
+}
+
 trait SelectionTest {
     type SelectionType: SelectionType;
     fn mimes(testwl: &mut testwl::Server) -> Vec<String>;
@@ -1771,7 +1979,7 @@ fn override_redirect_choose_hover_window() {
     let id3 = f.check_new_surface();
     let popup_data = f.testwl.get_surface_data(id3).unwrap();
     let win1_xdg = &f.testwl.get_surface_data(id1).unwrap().xdg().surface;
-    assert_eq!(&popup_data.popup().parent, win1_xdg);
+    assert_eq!(popup_data.popup().parent.as_ref(), Some(win1_xdg));
 }
 
 #[test]

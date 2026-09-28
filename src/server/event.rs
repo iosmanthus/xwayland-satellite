@@ -446,7 +446,10 @@ impl SurfaceEvents {
 
                 if first_configure {
                     let window_data = data.get::<&WindowData>().unwrap();
-                    if window_data.attrs.require_wm_focus() {
+                    // Notifications do not take focus from what the user is in.
+                    if window_data.attrs.require_wm_focus()
+                        && window_data.attrs.role != WindowRole::Notification
+                    {
                         let window = *data.get::<&x::Window>().unwrap();
                         state.inner.to_focus = Some(FocusData {
                             window,
@@ -501,7 +504,7 @@ pub(super) fn update_surface_viewport(
     debug!("{} viewport: {width}x{height}", surface.id());
 
     if let Some(data) = toplevel_data {
-        if window_data.attrs.role == WindowRole::Splash {
+        if window_data.attrs.role.is_fixed_size() {
             update_fixed_size(data, dims, scale_factor.0);
         } else if let Some(hints) = size_hints {
             update_size_hints(data, hints, scale_factor.0);
@@ -509,7 +512,7 @@ pub(super) fn update_surface_viewport(
     }
 }
 
-/// Pins a fixed-size window (see [`WindowRole::Splash`]) at its current size, which
+/// Pins a fixed-size window (see [`WindowRole::is_fixed_size`]) at its current size, which
 /// follows the client resizing the window itself; its size hints do not apply.
 pub(super) fn update_fixed_size(data: &ToplevelData, dims: &WindowDims, scale: f64) {
     let decorations_height = if data.decoration.satellite.is_some() {
@@ -1088,6 +1091,17 @@ pub(super) struct OutputDimensions {
     pub width: i32,
     pub height: i32,
     rotated_90: bool,
+}
+
+impl OutputDimensions {
+    /// The output's size in X: its mode, turned as the output is.
+    pub(super) fn x_size(&self) -> (i32, i32) {
+        if self.rotated_90 {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        }
+    }
 }
 
 impl Default for OutputDimensions {
