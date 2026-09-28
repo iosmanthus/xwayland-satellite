@@ -654,6 +654,7 @@ impl XState {
         }
 
         let wm_hints = self.get_wm_hints(window)?;
+        let accepts_input = wm_hints.as_ref().map(|hints| hints.accepts_input);
         if let Some(hints) = wm_hints {
             server_state.set_win_hints(window, hints);
         }
@@ -673,6 +674,7 @@ impl XState {
             motif_wm_hints,
             wm_class,
             wm_normal_hints: size_hints,
+            accepts_input,
         };
         let role = heuristics.guess_window_role(&self.window_atoms);
         if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
@@ -1167,6 +1169,8 @@ struct WindowRoleHeuristics {
     motif_wm_hints: Option<motif::Hints>,
     wm_class: Option<String>,
     wm_normal_hints: Option<WmNormalHints>,
+    /// The input field of WM_HINTS, if the window has them.
+    accepts_input: Option<bool>,
 }
 impl WindowRoleHeuristics {
     fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
@@ -1216,7 +1220,16 @@ impl WindowRoleHeuristics {
                     );
                 }
                 x if x == window_atoms.utility => {
-                    return WindowRole::new_basic(motif_no_decor && forced_size);
+                    // A frameless utility window for another that takes no input is a
+                    // helper popping up over it (WeChat's like/comment bubble in Moments).
+                    // As a toplevel it would take activation from the window it is for,
+                    // which closes it.
+                    let no_input_helper = self.has_transient_for
+                        && motif_no_decor
+                        && self.accepts_input == Some(false);
+                    return WindowRole::new_basic(
+                        (motif_no_decor && forced_size) || no_input_helper,
+                    );
                 }
                 x if x == window_atoms.splash => return WindowRole::Splash,
                 // Notifications (toasts, a call's control bars) are laid out by the
@@ -1245,7 +1258,7 @@ impl WindowRoleHeuristics {
     fn log(&self, connection: &xcb::Connection) -> String {
         format!(
             "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
-            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}",
+            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}, accepts_input: {:?}",
             self.override_redirect,
             self.has_transient_for,
             self.window_types
@@ -1255,6 +1268,7 @@ impl WindowRoleHeuristics {
             self.motif_wm_hints,
             self.wm_class,
             self.wm_normal_hints,
+            self.accepts_input,
         )
     }
 }

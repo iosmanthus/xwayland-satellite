@@ -134,6 +134,40 @@ mod window_role_heuristics {
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
+    // WeChat's like/comment bubble in Moments: a frameless Qt::Tool window for
+    // the Moments window, which takes no input (WM_HINTS input false). As a
+    // toplevel it took activation from Moments, and WeChat closed it at once.
+    #[test]
+    fn wechat_moments_comment_bubble() {
+        let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new().min_size(362, 72);
+        let win = WindowRoleHeuristics {
+            window_types: vec![win_types.utility, win_types.normal],
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(wm_normal_hints.into()),
+            wm_class: Some("wechat".into()),
+            accepts_input: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
+
+        // Taking input, or unrelated to another window, it is a window of its own.
+        for (accepts_input, has_transient_for) in
+            [(Some(true), true), (None, true), (Some(false), false)]
+        {
+            let win = WindowRoleHeuristics {
+                accepts_input,
+                has_transient_for,
+                window_types: vec![win_types.utility, win_types.normal],
+                motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
+                wm_normal_hints: Some(WmNormalHints::new().min_size(362, 72).into()),
+                ..Default::default()
+            };
+            assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
+        }
+    }
+
     // https://github.com/Supreeeme/xwayland-satellite/issues/112
     #[test]
     fn reaper_main_app() {
@@ -241,6 +275,7 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility, win_types.normal],
             wm_class: Some("wechat".into()),
             wm_normal_hints: Some(wm_normal_hints.into()),
+            accepts_input: None,
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -262,6 +297,7 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             wm_class: Some("Godot".into()),
+            accepts_input: None,
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
