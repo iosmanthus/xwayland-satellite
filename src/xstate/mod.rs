@@ -939,6 +939,7 @@ xcb::atoms_struct! {
         utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
         tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP" only_if_exists = false,
         combo => b"_NET_WM_WINDOW_TYPE_COMBO" only_if_exists = false,
+        notification => b"_NET_WM_WINDOW_TYPE_NOTIFICATION" only_if_exists = false,
     }
 }
 
@@ -1125,7 +1126,8 @@ pub enum WindowRole {
     Toplevel,
     Popup,
     /// A special type of toplevel which is constrained to a fixed size
-    /// Commonly the window which displays while the main application is starting up
+    /// Commonly the window which displays while the main application is starting up,
+    /// and notification windows such as a video call's floating control bars
     Splash,
 }
 impl WindowRole {
@@ -1203,6 +1205,10 @@ impl WindowRoleHeuristics {
                     return WindowRole::new_basic(motif_no_decor && forced_size);
                 }
                 x if x == window_atoms.splash => return WindowRole::Splash,
+                // Notifications (toasts, a call's control bars) are laid out by the
+                // application at a size of its choosing. Tiled like a normal window,
+                // a strip a few dozen pixels tall fills a whole column.
+                x if x == window_atoms.notification => return WindowRole::Splash,
                 x if [
                     window_atoms.menu,
                     window_atoms.popup_menu,
