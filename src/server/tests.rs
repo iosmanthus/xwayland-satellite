@@ -1444,6 +1444,52 @@ fn splash_window_fixed_size() {
     assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 400, y: 300 }));
 }
 
+// Size hints are in X's pixels from the start: a window whose minimum size is
+// taller than the screen in logical pixels would open that tall, and stay so
+// once the hints are scaled (Feishu's meeting window, 1600x1290 at 2x).
+#[test]
+fn size_hints_scaled_at_creation() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output) = f.new_output(0, 0);
+    output.scale(2);
+    output.done();
+    f.run();
+    f.run();
+
+    let window = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: false,
+        dims: WindowDims {
+            width: 1600,
+            height: 1290,
+            ..Default::default()
+        },
+        fullscreen: false,
+    };
+    f.new_window(window, false, data);
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: Some(WinSize {
+                width: 1600,
+                height: 1290,
+            }),
+            max_size: Some(WinSize {
+                width: 3200,
+                height: 2000,
+            }),
+        },
+    );
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+
+    let id = f.check_new_surface();
+    let toplevel = f.testwl.get_surface_data(id).unwrap().toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 800, y: 645 }));
+    assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 1600, y: 1000 }));
+}
+
 trait SelectionTest {
     type SelectionType: SelectionType;
     fn mimes(testwl: &mut testwl::Server) -> Vec<String>;
