@@ -1036,7 +1036,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         if win.attrs.size_hints.is_none_or(|h| h != hints) {
             debug!("setting {window:?} hints {hints:?}");
             let mut query = data.query::<(&SurfaceRole, &SurfaceScaleFactor)>();
-            if let Some((SurfaceRole::Toplevel(Some(data)), scale_factor)) = query.get() {
+            // A fixed-size window keeps its size whatever it hints.
+            if let Some((SurfaceRole::Toplevel(Some(data)), scale_factor)) = query.get()
+                && win.attrs.role != WindowRole::Splash
+            {
                 event::update_size_hints(data, &hints, scale_factor.0);
             }
             win.attrs.size_hints = Some(hints);
@@ -1496,9 +1499,13 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         // heurisitc to display those windows on a seperate floating level.
         // https://yalter.github.io/niri/Floating-Windows.html
         if splash {
-            let dims = window.attrs.dims;
-            toplevel.set_min_size(dims.width.into(), dims.height.into());
-            toplevel.set_max_size(dims.width.into(), dims.height.into());
+            let scale = self
+                .world
+                .get::<&SurfaceScaleFactor>(entity)
+                .map_or(1.0, |scale| scale.0);
+            let (width, height) = event::fixed_size(&window.attrs.dims, scale);
+            toplevel.set_min_size(width, height);
+            toplevel.set_max_size(width, height);
         }
 
         let group = window.attrs.group.and_then(|win| {
