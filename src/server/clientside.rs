@@ -1,5 +1,5 @@
 use super::decoration::DecorationMarker;
-use super::overlay::OverlayMarker;
+use super::overlay::{OverlayMarker, Placed};
 
 use super::{GlobalName, ObjectEvent};
 use hecs::{Entity, World};
@@ -257,6 +257,21 @@ impl Dispatch<WlCallback, server::wl_callback::WlCallback> for MyWorld {
     ) {
         if let Event::<WlCallback>::Done { callback_data } = event {
             s_callback.done(callback_data);
+        }
+    }
+}
+
+impl Dispatch<WlCallback, Placed> for MyWorld {
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: <WlCallback as Proxy>::Event,
+        placed: &Placed,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let Event::<WlCallback>::Done { .. } = event {
+            placed.apply(&state.world);
         }
     }
 }

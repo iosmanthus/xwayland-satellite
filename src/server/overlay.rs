@@ -16,7 +16,7 @@ use super::{
 };
 use crate::XConnection;
 use crate::xstate::{WindowDims, WindowRole};
-use hecs::Entity;
+use hecs::{Entity, World};
 use log::{debug, warn};
 use smithay_client_toolkit::registry::SimpleGlobal;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
@@ -223,10 +223,20 @@ impl<S: X11Selection> InnerServerState<S> {
             y: origin_y,
         };
         let dims = window.attrs.dims;
+        drop(query);
         debug!(
             "creating overlay popup {:?} {dims:?} {entity:?} (scale: {scale})",
             *self.world.get::<&x::Window>(entity).unwrap(),
         );
+        self.world
+            .insert_one(
+                entity,
+                Placement {
+                    x: dims.x.into(),
+                    y: dims.y.into(),
+                },
+            )
+            .unwrap();
 
         let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
         positioner.set_size(
@@ -259,6 +269,50 @@ impl<S: X11Selection> InnerServerState<S> {
             },
         }
     }
+}
+
+/// Where an overlay popup is, in X's coordinates, as far as the compositor has placed it.
+///
+/// X moves the window as soon as its client asks, and the compositor moves the popup a
+/// round trip later. Meanwhile, pointer positions the compositor gives in the popup are
+/// from where it was; they are given to X from where the window is now (see
+/// [`pointer_offset`]). Otherwise a client that moves the window by where the pointer is in
+/// it, as it drags the window, counts each move again, and the window runs away from the
+/// pointer.
+pub(super) struct Placement {
+    pub(super) x: i32,
+    pub(super) y: i32,
+}
+
+/// User data of a callback done once the compositor has placed a popup at `x`, `y`.
+pub(super) struct Placed {
+    pub(super) entity: Entity,
+    pub(super) x: i32,
+    pub(super) y: i32,
+}
+
+impl Placed {
+    pub(super) fn apply(&self, world: &World) {
+        if let Ok(mut placement) = world.get::<&mut Placement>(self.entity) {
+            placement.x = self.x;
+            placement.y = self.y;
+        }
+    }
+}
+
+/// What to add to a pointer position in `entity`'s surface, in X's pixels, for it to be one
+/// in its X window.
+pub(super) fn pointer_offset(world: &World, entity: Entity) -> (f64, f64) {
+    let Ok(mut query) = world.query_one::<(&Placement, &WindowData)>(entity) else {
+        return (0., 0.);
+    };
+    let Some((placement, window)) = query.get() else {
+        return (0., 0.);
+    };
+    (
+        (placement.x - i32::from(window.attrs.dims.x)).into(),
+        (placement.y - i32::from(window.attrs.dims.y)).into(),
+    )
 }
 
 /// Whether `entity` is a notification window made a popup of an overlay, which its
