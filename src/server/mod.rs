@@ -517,6 +517,8 @@ pub struct InnerServerState<S: X11Selection> {
     decoration_manager: Option<ZxdgDecorationManagerV1>,
     layer_shell: Option<ZwlrLayerShellV1>,
     display: client::wl_display::WlDisplay,
+    /// The notification window the pointer was last pressed in, to give keys to.
+    overlay_pressed: Option<Entity>,
     selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -645,6 +647,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             decoration_manager,
             layer_shell,
             display,
+            overlay_pressed: None,
             world,
         };
         Self {
@@ -1244,6 +1247,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             win.mapped = false;
         }
 
+        self.overlay_window_unmapped(entity.unwrap());
         if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
             role.destroy();
         }
