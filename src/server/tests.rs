@@ -1661,7 +1661,57 @@ fn notification_window_overlay_popup() {
         .popup()
         .positioner_state;
     assert_eq!(pos.offset, testwl::Vec2 { x: 500, y: 900 });
-    assert_eq!(f.connection().window(window).dims, moved);
+    assert_eq!(window_dims(&f, window), moved);
+}
+
+fn window_dims(f: &TestFixture<FakeXConnection>, window: Window) -> WindowDims {
+    let entity = f.satellite.windows[&window];
+    f.satellite
+        .world
+        .get::<&crate::server::WindowData>(entity)
+        .unwrap()
+        .attrs
+        .dims
+}
+
+// X has a notification window where its client puts it. The compositor
+// answers each move a while later, sometimes after the client has moved it
+// again; putting the window where an answer says would move it back, and each
+// answer would tell the client of a move it made already.
+#[test]
+fn notification_window_moves_are_the_clients() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+
+    let window = Window::new(1);
+    let dims = WindowDims {
+        x: 1650,
+        y: 2020,
+        width: 538,
+        height: 56,
+    };
+    let id = new_notification(&mut f, &comp, window, dims);
+    f.testwl.configure_popup(id);
+    f.run();
+    f.run();
+    let written = f.connection().set_window_dims_counter;
+
+    for x in [1600, 1590] {
+        f.reconfigure_window(window, WindowDims { x, ..dims }, false);
+    }
+    f.run();
+    f.run();
+
+    let pos = &f
+        .testwl
+        .get_surface_data(id)
+        .unwrap()
+        .popup()
+        .positioner_state;
+    assert_eq!(pos.offset, testwl::Vec2 { x: 795, y: 1010 });
+    assert_eq!(window_dims(&f, window), WindowDims { x: 1590, ..dims });
+    assert_eq!(f.connection().set_window_dims_counter, written);
 }
 
 // A client dragging its notification window moves it in X at once, and the

@@ -327,23 +327,27 @@ impl SurfaceEvents {
                 data.get::<&WlSurface>().unwrap().id(),
             );
             if data.has::<overlay::Placement>() {
+                // Its client places it, and X has it where the client asked. This answers a
+                // move the client may have followed with others already: putting the window
+                // here would move it back, and tell the client of a move it made itself.
                 placed = Some((x, y));
+                drop(query);
+            } else {
+                window_data.attrs.dims = WindowDims {
+                    x: x as i16,
+                    y: y as i16,
+                    width,
+                    height,
+                };
+                let pending = PendingSurfaceState {
+                    x,
+                    y,
+                    width: width as _,
+                    height: height as _,
+                };
+                drop(query);
+                state.world.insert_one(target, pending).unwrap();
             }
-
-            window_data.attrs.dims = WindowDims {
-                x: x as i16,
-                y: y as i16,
-                width,
-                height,
-            };
-            let pending = PendingSurfaceState {
-                x,
-                y,
-                width: width as _,
-                height: height as _,
-            };
-            drop(query);
-            state.world.insert_one(target, pending).unwrap();
             update_surface_viewport(&state.world, state.world.query_one(target).unwrap());
         }
 
