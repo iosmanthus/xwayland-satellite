@@ -1532,11 +1532,18 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         let toplevel = xdg.get_toplevel(&self.qh, entity);
         if let Some(hints) = &window.attrs.size_hints {
+            // In X's pixels, as update_size_hints has them: the compositor sizes the window
+            // by its first hints, and would keep one too big when they are scaled down later.
+            let scale = self
+                .world
+                .get::<&SurfaceScaleFactor>(entity)
+                .map_or(1.0, |scale| scale.0);
+            let logical = |size: i32| (size as f64 / scale) as i32;
             if let Some(min) = &hints.min_size {
-                toplevel.set_min_size(min.width, min.height);
+                toplevel.set_min_size(logical(min.width), logical(min.height));
             }
             if let Some(max) = &hints.max_size {
-                toplevel.set_max_size(max.width, max.height);
+                toplevel.set_max_size(logical(max.width), logical(max.height));
             }
         }
         // Application splash windows are usually startup displays, so reporting their dimensions
