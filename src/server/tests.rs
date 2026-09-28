@@ -16,7 +16,7 @@ use wayland_client::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
         wl_display::WlDisplay,
-        wl_keyboard::WlKeyboard,
+        wl_keyboard::{self, WlKeyboard},
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
         wl_registry::WlRegistry,
@@ -231,6 +231,10 @@ impl super::XConnection for FakeXConnection {
 
     #[track_caller]
     fn focus_window(&mut self, window: Window, _output_name: Option<String>) {
+        if window == x::WINDOW_NONE {
+            self.focused_window = None;
+            return;
+        }
         assert!(
             self.windows.contains_key(&window),
             "Unknown window: {window:?}"
@@ -1598,7 +1602,11 @@ fn output_overlay() {
     assert_eq!(layer.size, testwl::Vec2 { x: 1, y: 1 });
     assert_eq!(layer.anchor, Anchor::Top | Anchor::Left);
     assert_eq!(layer.exclusive_zone, -1);
-    assert_eq!(layer.keyboard_interactivity, KeyboardInteractivity::None);
+    // Keys on demand (see notification_panel_takes_focus_and_keys).
+    assert_eq!(
+        layer.keyboard_interactivity,
+        KeyboardInteractivity::OnDemand
+    );
     assert!(layer.last_configure_serial.is_some());
     assert_eq!(layer.acked_serial, layer.last_configure_serial);
     assert!(data.buffer.is_some());
@@ -1948,6 +1956,114 @@ fn notification_window_moves_to_another_output() {
     assert_eq!(window_dims(&f, window), moved);
     let data = f.testwl.get_surface_data(id).unwrap();
     assert!(data.buffer.is_some(), "popup lost its buffer");
+}
+
+// Feishu's meeting panels (the danmaku input, the participant list) are
+// notification windows transient for its meeting bar. It closes one a moment
+// after opening it unless it gets focus, and the danmaku one takes text: the
+// overlay takes keys on demand, and gives them to the panel clicked.
+#[test]
+fn notification_panel_takes_focus_and_keys() {
+    use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_surface_v1::KeyboardInteractivity;
+
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let _pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let keyboard =
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    let (_, overlay) = new_overlay_output(&mut f, 0, 0);
+    // On demand only once mapped, so mapping it takes no focus.
+    let layer = f.testwl.get_surface_data(overlay).unwrap().layer();
+    assert_eq!(
+        layer.keyboard_interactivity,
+        KeyboardInteractivity::OnDemand
+    );
+
+    let bar = Window::new(1);
+    let bar_dims = WindowDims {
+        x: 1650,
+        y: 2020,
+        width: 538,
+        height: 56,
+    };
+    let bar_id = new_notification(&mut f, &comp, bar, bar_dims);
+    f.testwl.configure_popup(bar_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, None);
+
+    let panel = Window::new(2);
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: false,
+        dims: WindowDims {
+            x: 1600,
+            y: 1760,
+            width: 904,
+            height: 256,
+        },
+        fullscreen: false,
+    };
+    f.new_window(panel, false, data);
+    f.satellite
+        .set_window_role(panel, crate::xstate::WindowRole::Notification);
+    f.satellite.set_transient_for(panel, bar);
+    f.satellite.set_win_hints(
+        panel,
+        super::WmHints {
+            window_group: None,
+            accepts_input: true,
+        },
+    );
+    f.map_window(&comp, panel, &surface.obj, &buffer);
+    f.run();
+    let panel_id = f.check_new_surface();
+    f.testwl.configure_popup(panel_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+
+    let panel_surface = f.testwl.get_surface_data(panel_id).unwrap().surface.clone();
+    f.testwl.pointer().enter(10, &panel_surface, 5.0, 5.0);
+    f.testwl.pointer().motion(0, 5.0, 5.0);
+    f.testwl.pointer().frame();
+    f.testwl.pointer().button(
+        11,
+        0,
+        0x110,
+        wayland_server::protocol::wl_pointer::ButtonState::Pressed,
+    );
+    f.testwl.pointer().frame();
+    f.run();
+    f.run();
+    std::mem::take(&mut *keyboard.data.events.lock().unwrap());
+
+    // Clicking the overlay's popup gives the overlay keyboard focus.
+    f.testwl.focus_toplevel(overlay);
+    f.run();
+    f.run();
+    f.run();
+    let entered = std::mem::take(&mut *keyboard.data.events.lock().unwrap())
+        .into_iter()
+        .find_map(|event| match event {
+            wl_keyboard::Event::Enter { surface, .. } => Some(surface),
+            _ => None,
+        });
+    assert_eq!(entered.map(|s| s.id()), Some(surface.obj.id()));
+    assert_eq!(f.connection().focused_window, Some(panel));
+
+    f.testwl.unfocus_toplevel();
+    f.run();
+    f.run();
+    f.run();
+    let left = std::mem::take(&mut *keyboard.data.events.lock().unwrap())
+        .into_iter()
+        .find_map(|event| match event {
+            wl_keyboard::Event::Leave { surface, .. } => Some(surface),
+            _ => None,
+        });
+    assert_eq!(left.map(|s| s.id()), Some(surface.obj.id()));
 }
 
 // Without wlr-layer-shell, a notification window is a toplevel of its size.
