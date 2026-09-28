@@ -1545,6 +1545,7 @@ impl<S: X11Selection> GlobalDispatch<WlOutput, Global> for InnerServerState<S> {
                 GlobalName(data.name),
             ),
         );
+        state.add_overlay(entity);
         state.updated_outputs.push(entity);
     }
 }

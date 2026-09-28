@@ -870,6 +870,7 @@ dependencies = [
  "rustix",
  "rustversion",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "wayland-server",
  "wl_drm",
 ]
@@ -1141,6 +1142,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]
@@ -1285,6 +1287,7 @@ dependencies = [
  "vergen-gitcl",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "wayland-server",
  "wl_drm",
  "xcb",
