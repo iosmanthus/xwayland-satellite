@@ -576,7 +576,10 @@ impl XState {
                 let button = data[3];
                 // XXX: This can technically be driven by keyboard events and other mouse buttons as well,
                 // but I haven't found an application that does this yet. We'll cross that bridge when we get to it.
-                if button != 1 {
+                // 0 is a button the client does not know (EWMH); Feishu moves its floating
+                // screen-share panel that way from a left click. The move goes with the last
+                // click either way, and the compositor holds it to that click's serial.
+                if button > 1 {
                     warn!(
                         "Attempted move/resize of {:?} with non left click button ({button})",
                         e.window()
