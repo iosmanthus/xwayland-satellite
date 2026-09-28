@@ -9,7 +9,7 @@
 //! on its output, offset by its X position within that output.
 
 use super::clientside::MyWorld;
-use super::event::{OutputDimensions, OutputScaleFactor, SurfaceScaleFactor};
+use super::event::{CurrentSurface, OutputDimensions, OutputScaleFactor, SurfaceScaleFactor};
 use super::{
     Event, InnerServerState, PopupData, ServerState, SurfaceRole, WindowData, WindowOutputOffset,
     X11Selection, XdgSurfaceData,
@@ -32,6 +32,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
+use wayland_server::protocol as server;
 use xcb::x;
 
 /// User data of an overlay's surface, whose events are of no interest.
@@ -154,6 +155,66 @@ impl<S: X11Selection> InnerServerState<S> {
         })
     }
 
+    /// The output under the centre of a window at `dims`, if it has a mapped overlay.
+    fn overlay_output_under(&self, dims: WindowDims) -> Option<Entity> {
+        let centre_x = dims.x as i32 + dims.width as i32 / 2;
+        let centre_y = dims.y as i32 + dims.height as i32 / 2;
+        let mut query = self.world.query::<(&OutputDimensions, &Overlay)>();
+        query.iter().find_map(|(entity, (output, overlay))| {
+            let (x, y) = self.output_x_origin(output);
+            let (width, height) = output.x_size();
+            let inside = (x..x + width).contains(&centre_x) && (y..y + height).contains(&centre_y);
+            (overlay.mapped && inside).then_some(entity)
+        })
+    }
+
+    /// The output an overlay popup at `dims` belongs on, if not the one it is on: the
+    /// compositor keeps a popup on its parent's output.
+    pub(super) fn overlay_output_moved_to(
+        &self,
+        entity: Entity,
+        dims: WindowDims,
+    ) -> Option<Entity> {
+        let parent = self.world.get::<&OverlayParent>(entity).ok()?.0;
+        self.overlay_output_under(dims)
+            .filter(|&output| output != parent)
+    }
+
+    /// Makes an overlay popup again on `output`'s overlay.
+    pub(super) fn move_overlay_popup(&mut self, entity: Entity, output: Entity) {
+        debug!("moving overlay popup {entity:?} to output {output:?}");
+        if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity) {
+            role.destroy();
+        }
+        let surface = WlSurface::clone(&self.world.get::<&WlSurface>(entity).unwrap());
+        // A new role object is for an unmapped surface.
+        surface.attach(None, 0, 0);
+        surface.commit();
+        let xdg = self.xdg_wm_base.get_xdg_surface(&surface, &self.qh, entity);
+        let popup = self.create_overlay_popup(entity, xdg, output);
+        let last = self
+            .world
+            .get::<&LastBuffer>(entity)
+            .ok()
+            .and_then(|last| last.0.clone());
+        if last.is_some() {
+            self.world
+                .insert_one(
+                    entity,
+                    super::SurfaceAttach {
+                        buffer: last,
+                        x: 0,
+                        y: 0,
+                    },
+                )
+                .unwrap();
+        }
+        surface.commit();
+        self.world
+            .insert_one(entity, SurfaceRole::Popup(Some(popup)))
+            .unwrap();
+    }
+
     /// Where `output` starts in X's coordinate space.
     pub(super) fn output_x_origin(&self, output: &OutputDimensions) -> (i32, i32) {
         self.global_output_offset
@@ -229,12 +290,15 @@ impl<S: X11Selection> InnerServerState<S> {
             *self.world.get::<&x::Window>(entity).unwrap(),
         );
         self.world
-            .insert_one(
+            .insert(
                 entity,
-                Placement {
-                    x: dims.x.into(),
-                    y: dims.y.into(),
-                },
+                (
+                    Placement {
+                        x: dims.x.into(),
+                        y: dims.y.into(),
+                    },
+                    OverlayParent(output),
+                ),
             )
             .unwrap();
 
@@ -270,6 +334,13 @@ impl<S: X11Selection> InnerServerState<S> {
         }
     }
 }
+
+/// The output whose overlay an overlay popup is of.
+pub(super) struct OverlayParent(Entity);
+
+/// The buffer Xwayland last attached to an overlay popup, for the popup made again on
+/// another output: Xwayland attaches none for a window only moved.
+pub(super) struct LastBuffer(pub(super) Option<wayland_client::protocol::wl_buffer::WlBuffer>);
 
 /// Where an overlay popup is, in X's coordinates, as far as the compositor has placed it.
 ///
@@ -313,6 +384,112 @@ pub(super) fn pointer_offset(world: &World, entity: Entity) -> (f64, f64) {
         (placement.x - i32::from(window.attrs.dims.x)).into(),
         (placement.y - i32::from(window.attrs.dims.y)).into(),
     )
+}
+
+/// Where the pointer is, in X's coordinates, while it is in an overlay popup: where it
+/// entered, moved by its relative motion since. A component of the pointer's entity.
+///
+/// Pointer positions the compositor gives in a popup are from where it has the popup, which
+/// is behind where X has the window while its client moves it, and it gives new ones as the
+/// popup catches up, as if the pointer had moved. Only relative motion is the pointer moving,
+/// so the pointer's position in the window is given from it instead, as X would have it.
+pub(super) struct OverlayPointer {
+    x: f64,
+    y: f64,
+}
+
+/// Marks a pointer that satellite gets relative motion for.
+pub(super) struct HasRelativeMotion;
+
+/// The pointer a relative pointer is of: a component of the relative pointer's entity.
+pub(super) struct RelativeOf(pub(super) Entity);
+
+/// The pointer's position in X as it enters `surface` at `x`, `y` (in the window, in X's
+/// pixels), if it goes by relative motion there: it is an overlay popup, and satellite gets
+/// relative motion for the pointer.
+pub(super) fn overlay_pointer(
+    world: &World,
+    pointer: Entity,
+    surface: Entity,
+    (x, y): (f64, f64),
+) -> Option<OverlayPointer> {
+    if !world
+        .satisfies::<&HasRelativeMotion>(pointer)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let mut query = world.query_one::<(&Placement, &WindowData)>(surface).ok()?;
+    let (_, window) = query.get()?;
+    Some(OverlayPointer {
+        x: f64::from(window.attrs.dims.x) + x,
+        y: f64::from(window.attrs.dims.y) + y,
+    })
+}
+
+/// Whether the pointer goes by relative motion, in an overlay popup.
+pub(super) fn follows_relative_motion(world: &World, pointer: Entity) -> bool {
+    world.satisfies::<&OverlayPointer>(pointer).unwrap_or(false)
+}
+
+impl<S: X11Selection> InnerServerState<S> {
+    /// Moves the pointer of `relative` by `dx`, `dy` (logical pixels), if it is in an overlay
+    /// popup, and gives X where it now is in the window.
+    pub(super) fn overlay_relative_motion(
+        &mut self,
+        relative: Entity,
+        time: u32,
+        dx: f64,
+        dy: f64,
+    ) {
+        let Ok(pointer) = self.world.get::<&RelativeOf>(relative).map(|r| r.0) else {
+            return;
+        };
+        let bounds = self.x_screen_bounds();
+        let Ok(mut query) = self.world.query_one::<(
+            &mut OverlayPointer,
+            &CurrentSurface,
+            &SurfaceScaleFactor,
+            &server::wl_pointer::WlPointer,
+        )>(pointer) else {
+            return;
+        };
+        let Some((position, &CurrentSurface::Xwayland(surface), scale, server)) = query.get()
+        else {
+            return;
+        };
+        position.x += dx * scale.0;
+        position.y += dy * scale.0;
+        // The compositor keeps the pointer on its outputs, and goes on giving relative motion.
+        if let Some((x0, y0, x1, y1)) = bounds {
+            position.x = position.x.clamp(x0, x1);
+            position.y = position.y.clamp(y0, y1);
+        }
+        let Ok(window) = self.world.get::<&WindowData>(surface) else {
+            return;
+        };
+        let dims = window.attrs.dims;
+        server.motion(
+            time,
+            position.x - f64::from(dims.x),
+            position.y - f64::from(dims.y),
+        );
+    }
+
+    /// The bounds of all outputs in X: left, top, right, bottom (the last pixels in).
+    fn x_screen_bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        let mut bounds: Option<(i32, i32, i32, i32)> = None;
+        for (_, output) in self.world.query::<&OutputDimensions>().iter() {
+            let (x, y) = self.output_x_origin(output);
+            let (width, height) = output.x_size();
+            let (x1, y1) = (x + width - 1, y + height - 1);
+            bounds = Some(match bounds {
+                None => (x, y, x1, y1),
+                Some((bx, by, bx1, by1)) => (bx.min(x), by.min(y), bx1.max(x1), by1.max(y1)),
+            });
+        }
+        bounds.map(|(x, y, x1, y1)| (x.into(), y.into(), x1.into(), y1.into()))
+    }
 }
 
 /// Whether `entity` is a notification window made a popup of an overlay, which its
