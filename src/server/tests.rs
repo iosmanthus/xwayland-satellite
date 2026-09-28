@@ -18,7 +18,7 @@ use wayland_client::{
         wl_display::WlDisplay,
         wl_keyboard::WlKeyboard,
         wl_output::{self, WlOutput},
-        wl_pointer::WlPointer,
+        wl_pointer::{self, WlPointer},
         wl_registry::WlRegistry,
         wl_seat::{self, WlSeat},
         wl_shm::{Format, WlShm},
@@ -1662,6 +1662,70 @@ fn notification_window_overlay_popup() {
         .positioner_state;
     assert_eq!(pos.offset, testwl::Vec2 { x: 500, y: 900 });
     assert_eq!(f.connection().window(window).dims, moved);
+}
+
+// A client dragging its notification window moves it in X at once, and the
+// compositor moves the popup a round trip later. Pointer positions in the
+// window follow X meanwhile; if they followed the popup, a client moving the
+// window by where the pointer is in it would count each move again and the
+// window would run away from the pointer.
+#[test]
+fn notification_window_pointer_follows_x_position() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    new_overlay_output(&mut f, 0, 0);
+
+    let window = Window::new(1);
+    let dims = WindowDims {
+        x: 1650,
+        y: 2020,
+        width: 538,
+        height: 56,
+    };
+    let id = new_notification(&mut f, &comp, window, dims);
+    f.testwl.configure_popup(id);
+    f.run();
+    f.run();
+
+    let last_motion = |pointer: &TestObject<WlPointer>| {
+        std::mem::take(&mut *pointer.data.events.lock().unwrap())
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                wl_pointer::Event::Motion {
+                    surface_x,
+                    surface_y,
+                    ..
+                } => Some((surface_x, surface_y)),
+                _ => None,
+            })
+    };
+
+    let surface = f.testwl.get_surface_data(id).unwrap().surface.clone();
+    f.testwl.pointer().enter(1, &surface, 10.0, 10.0);
+    f.testwl.pointer().motion(1, 10.0, 10.0);
+    f.run();
+    f.run();
+    f.run();
+    assert_eq!(last_motion(&pointer), Some((20.0, 20.0)));
+
+    // Moved 6 left in X; the compositor has yet to move the popup, so the
+    // pointer is where it was in it.
+    f.reconfigure_window(window, WindowDims { x: 1644, ..dims }, false);
+    f.testwl.pointer().motion(2, 10.0, 10.0);
+    f.run();
+    f.run();
+    f.run();
+    assert_eq!(last_motion(&pointer), Some((26.0, 20.0)));
+
+    // The popup has moved.
+    f.testwl.pointer().motion(3, 13.0, 10.0);
+    f.run();
+    f.run();
+    f.run();
+    assert_eq!(last_motion(&pointer), Some((26.0, 20.0)));
 }
 
 // A notification window goes on the overlay of the output it is on in X.

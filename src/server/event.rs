@@ -287,6 +287,7 @@ impl SurfaceEvents {
 
         let pending = xdg.pending.take();
         drop(xdg);
+        let mut placed = None;
 
         if let Some(pending) = pending {
             let mut query = data.query::<(
@@ -325,6 +326,9 @@ impl SurfaceEvents {
                 "configuring {} ({window:?}): {x}x{y}, {width}x{height}",
                 data.get::<&WlSurface>().unwrap().id(),
             );
+            if data.has::<overlay::Placement>() {
+                placed = Some((x, y));
+            }
 
             window_data.attrs.dims = WindowDims {
                 x: x as i16,
@@ -363,6 +367,17 @@ impl SurfaceEvents {
             cmd.remove_one::<client::wl_callback::WlCallback>(target);
         }
         surface.commit();
+        if let Some((x, y)) = placed {
+            // Done once the compositor has handled the commit, and placed the popup.
+            state.display.sync(
+                &state.qh,
+                overlay::Placed {
+                    entity: target,
+                    x,
+                    y,
+                },
+            );
+        }
         cmd.run_on(&mut state.world);
     }
 
@@ -678,9 +693,16 @@ impl Event for client::wl_pointer::Event {
                 cmd.insert(target, (*scale,));
 
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
+                let (offset_x, offset_y) =
+                    overlay::pointer_offset(&state.world, surface_entity.unwrap());
                 let mut do_enter = || {
                     debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
-                    server.enter(serial, surface, surface_x * scale.0, surface_y * scale.0);
+                    server.enter(
+                        serial,
+                        surface,
+                        surface_x * scale.0 + offset_x,
+                        surface_y * scale.0 + offset_y,
+                    );
                     connection.raise_to_top(*window);
                     if !surface_is_popup {
                         state.last_hovered = Some(*window);
@@ -750,27 +772,29 @@ impl Event for client::wl_pointer::Event {
                 if !handle_pending_enter(target, state, "motion") {
                     return;
                 }
-                {
+                let (offset_x, offset_y) = {
                     let Ok(surface) = state.world.get::<&CurrentSurface>(target) else {
                         warn!("could not motion on surface: stale surface");
                         return;
                     };
-                    if let CurrentSurface::Decoration(parent) = &*surface {
-                        decoration::handle_pointer_motion(state, *parent, surface_x, surface_y);
-                        return;
+                    match *surface {
+                        CurrentSurface::Decoration(parent) => {
+                            decoration::handle_pointer_motion(state, parent, surface_x, surface_y);
+                            return;
+                        }
+                        CurrentSurface::Xwayland(entity) => {
+                            overlay::pointer_offset(&state.world, entity)
+                        }
                     }
-                }
+                };
                 let (server, scale) = state
                     .world
                     .query_one_mut::<(&WlPointer, &SurfaceScaleFactor)>(target)
                     .unwrap();
-                trace!(
-                    target: "pointer_position",
-                    "pointer motion {} {}",
-                    surface_x * scale.0,
-                    surface_y * scale.0
-                );
-                server.motion(time, surface_x * scale.0, surface_y * scale.0);
+                let x = surface_x * scale.0 + offset_x;
+                let y = surface_y * scale.0 + offset_y;
+                trace!(target: "pointer_position", "pointer motion {x} {y}");
+                server.motion(time, x, y);
             }
             Self::Button {
                 serial,
