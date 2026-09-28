@@ -597,7 +597,7 @@ impl Event for client::wl_seat::Event {
 }
 
 struct PendingEnter(client::wl_pointer::Event);
-enum CurrentSurface {
+pub(super) enum CurrentSurface {
     Xwayland(Entity),
     Decoration(Entity),
 }
@@ -699,6 +699,16 @@ impl Event for client::wl_pointer::Event {
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
                 let (offset_x, offset_y) =
                     overlay::pointer_offset(&state.world, surface_entity.unwrap());
+                let overlay_pointer = overlay::overlay_pointer(
+                    &state.world,
+                    target,
+                    surface_entity.unwrap(),
+                    (
+                        surface_x * scale.0 + offset_x,
+                        surface_y * scale.0 + offset_y,
+                    ),
+                );
+                let mut overlay_pointer = Some(overlay_pointer);
                 let mut do_enter = || {
                     debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
                     server.enter(
@@ -712,6 +722,10 @@ impl Event for client::wl_pointer::Event {
                         state.last_hovered = Some(*window);
                     }
                     cmd.insert_one(target, CurrentSurface::Xwayland(surface_entity.unwrap()));
+                    match overlay_pointer.take().flatten() {
+                        Some(position) => cmd.insert_one(target, position),
+                        None => cmd.remove_one::<overlay::OverlayPointer>(target),
+                    }
                 };
 
                 if !surface_is_popup {
@@ -743,6 +757,7 @@ impl Event for client::wl_pointer::Event {
             }
             Self::Leave { serial, surface } => {
                 let _ = state.world.remove_one::<PendingEnter>(target);
+                let _ = state.world.remove_one::<overlay::OverlayPointer>(target);
                 if !surface.is_alive() {
                     return;
                 }
@@ -774,6 +789,10 @@ impl Event for client::wl_pointer::Event {
                 surface_y,
             } => {
                 if !handle_pending_enter(target, state, "motion") {
+                    return;
+                }
+                // Given from relative motion instead (see overlay::OverlayPointer).
+                if overlay::follows_relative_motion(&state.world, target) {
                     return;
                 }
                 let (offset_x, offset_y) = {
@@ -1514,18 +1533,37 @@ impl Event for c_dmabuf::zwp_linux_dmabuf_feedback_v1::Event {
 
 impl Event for zwp_relative_pointer_v1::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let server = state.world.get::<&RelativePointerServer>(target).unwrap();
-        simple_event_shunt! {
-            server, self => [
-                RelativeMotion {
-                    utime_hi,
-                    utime_lo,
-                    dx,
-                    dy,
-                    dx_unaccel,
-                    dy_unaccel
-                }
-            ]
+        let motion = match self {
+            Self::RelativeMotion {
+                utime_hi,
+                utime_lo,
+                dx,
+                dy,
+                ..
+            } => Some((
+                (u64::from(utime_hi) << 32 | u64::from(utime_lo)) / 1000,
+                dx,
+                dy,
+            )),
+            _ => None,
+        };
+        {
+            let server = state.world.get::<&RelativePointerServer>(target).unwrap();
+            simple_event_shunt! {
+                server, self => [
+                    RelativeMotion {
+                        utime_hi,
+                        utime_lo,
+                        dx,
+                        dy,
+                        dx_unaccel,
+                        dy_unaccel
+                    }
+                ]
+            }
+        }
+        if let Some((time, dx, dy)) = motion {
+            state.overlay_relative_motion(target, time as u32, dx, dy);
         }
     }
 }

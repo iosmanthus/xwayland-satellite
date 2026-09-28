@@ -22,7 +22,10 @@ use wayland_protocols::{
             zwp_locked_pointer_v1::{self, ZwpLockedPointerV1},
             zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
         },
-        relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        relative_pointer::zv1::server::{
+            zwp_relative_pointer_manager_v1::{self, ZwpRelativePointerManagerV1},
+            zwp_relative_pointer_v1::ZwpRelativePointerV1,
+        },
         tablet::zv2::server::{
             zwp_tablet_manager_v2::ZwpTabletManagerV2,
             zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2,
@@ -306,6 +309,7 @@ struct State {
     touch: Option<WlTouch>,
     tablet: Option<ZwpTabletV2>,
     tablet_tool: Option<ZwpTabletToolV2>,
+    relative_pointer: Option<ZwpRelativePointerV1>,
     configure_serial: u32,
     clipboard: Option<WlDataSource>,
     primary: Option<ZwpPrimarySelectionSourceV1>,
@@ -338,6 +342,7 @@ impl Default for State {
             touch: None,
             tablet: None,
             tablet_tool: None,
+            relative_pointer: None,
             configure_serial: 0,
             clipboard: None,
             primary: None,
@@ -511,7 +516,9 @@ impl Server {
         dh.create_global::<State, WpViewporter, _>(1, ());
         dh.create_global::<State, ZwpPointerConstraintsV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
-        global_noop!(ZwpRelativePointerManagerV1);
+        if noops {
+            dh.create_global::<State, ZwpRelativePointerManagerV1, _>(1, ());
+        }
         global_noop!(WpLinuxDrmSyncobjManagerV1);
 
         struct HandlerData;
@@ -950,6 +957,18 @@ impl Server {
             .expect("Output doesn't have an xdg output");
         xdg.logical_position(x, y);
         xdg.done();
+        self.display.flush_clients().unwrap();
+    }
+
+    /// Sends relative motion, in logical pixels, to the client's relative pointer.
+    #[track_caller]
+    pub fn relative_motion(&mut self, dx: f64, dy: f64) {
+        let pointer = self
+            .state
+            .relative_pointer
+            .as_ref()
+            .expect("No relative pointer created");
+        pointer.relative_motion(0, 0, dx, dy, dx, dy);
         self.display.flush_clients().unwrap();
     }
 
@@ -1564,6 +1583,41 @@ impl Dispatch<WlTouch, ()> for State {
             wl_touch::Request::Release => {}
             other => todo!("unhandled request {other:?}"),
         }
+    }
+}
+
+simple_global_dispatch!(ZwpRelativePointerManagerV1);
+
+impl Dispatch<ZwpRelativePointerManagerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &ZwpRelativePointerManagerV1,
+        request: <ZwpRelativePointerManagerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_relative_pointer_manager_v1::Request::GetRelativePointer { id, .. } => {
+                state.relative_pointer = Some(data_init.init(id, ()));
+            }
+            zwp_relative_pointer_manager_v1::Request::Destroy => {}
+            other => todo!("unhandled request {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<ZwpRelativePointerV1, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &ZwpRelativePointerV1,
+        _: <ZwpRelativePointerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
     }
 }
 
