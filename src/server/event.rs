@@ -466,12 +466,14 @@ impl SurfaceEvents {
                 if first_configure {
                     let window_data = data.get::<&WindowData>().unwrap();
                     // Notifications do not take focus from what the user is in, but panels
-                    // (transient for another window) do: Feishu closes its meeting panels
-                    // a moment after opening them unless they get focus.
-                    if window_data.attrs.require_wm_focus()
-                        && (window_data.attrs.role != WindowRole::Notification
-                            || window_data.attrs.transient_for.is_some())
-                    {
+                    // do (see WindowAttributes::is_focused_panel).
+                    let attrs = &window_data.attrs;
+                    let focus = if attrs.role == WindowRole::Notification {
+                        attrs.is_focused_panel()
+                    } else {
+                        attrs.require_wm_focus()
+                    };
+                    if focus {
                         let window = *data.get::<&x::Window>().unwrap();
                         state.inner.to_focus = Some(FocusData {
                             window,

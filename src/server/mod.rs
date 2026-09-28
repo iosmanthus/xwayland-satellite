@@ -116,11 +116,24 @@ struct WindowAttributes {
     group: Option<x::Window>,
     decorations: Option<Decorations>,
     transient_for: Option<x::Window>,
+    /// Whether the window has WM_HINTS, which `accepts_input` comes from.
+    has_wm_hints: bool,
 }
 
 impl WindowAttributes {
     fn require_wm_focus(&self) -> bool {
         !self.override_redirect && (self.has_take_focus || self.accepts_input)
+    }
+
+    /// Whether a notification window is a panel to focus as it is shown: one transient for
+    /// another (Feishu closes its meeting panels a moment after opening them unless they get
+    /// focus). Feishu sets no WM_HINTS on them; without them, window managers take a window
+    /// to accept input.
+    fn is_focused_panel(&self) -> bool {
+        self.role == WindowRole::Notification
+            && self.transient_for.is_some()
+            && !self.override_redirect
+            && (self.has_take_focus || self.accepts_input || !self.has_wm_hints)
     }
 }
 
@@ -1048,6 +1061,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let attrs = &mut self.world.get::<&mut WindowData>(id).unwrap().attrs;
         attrs.group = hints.window_group;
         attrs.accepts_input = hints.accepts_input;
+        attrs.has_wm_hints = true;
     }
 
     pub fn set_take_focus(&mut self, window: x::Window, has_take_focus: bool) {

@@ -2008,14 +2008,8 @@ fn notification_panel_takes_focus_and_keys() {
     f.new_window(panel, false, data);
     f.satellite
         .set_window_role(panel, crate::xstate::WindowRole::Notification);
+    // No WM_HINTS, as Feishu sets none on its panels: input is assumed.
     f.satellite.set_transient_for(panel, bar);
-    f.satellite.set_win_hints(
-        panel,
-        super::WmHints {
-            window_group: None,
-            accepts_input: true,
-        },
-    );
     f.map_window(&comp, panel, &surface.obj, &buffer);
     f.run();
     let panel_id = f.check_new_surface();
