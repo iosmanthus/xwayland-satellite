@@ -546,6 +546,7 @@ impl<S: X11Selection> InnerServerState<S> {
         self.world
             .insert_one(keyboard, OverlayKeyboard(entity))
             .unwrap();
+        self.focused_overlay = Some(entity);
         true
     }
 
@@ -554,6 +555,9 @@ impl<S: X11Selection> InnerServerState<S> {
         let Ok(OverlayKeyboard(entity)) = self.world.remove_one::<OverlayKeyboard>(keyboard) else {
             return;
         };
+        if self.focused_overlay == Some(entity) {
+            self.focused_overlay = None;
+        }
         let server = self.world.get::<&server::wl_keyboard::WlKeyboard>(keyboard);
         let surface = self.world.get::<&server::wl_surface::WlSurface>(entity);
         if let (Ok(server), Ok(surface)) = (server, surface) {
@@ -566,6 +570,9 @@ impl<S: X11Selection> InnerServerState<S> {
     pub(super) fn overlay_window_unmapped(&mut self, entity: Entity) {
         if self.overlay_pressed == Some(entity) {
             self.overlay_pressed = None;
+        }
+        if self.focused_overlay == Some(entity) {
+            self.focused_overlay = None;
         }
         let keyboards: Vec<Entity> = self
             .world

@@ -2060,6 +2060,76 @@ fn notification_panel_takes_focus_and_keys() {
     assert_eq!(left.map(|s| s.id()), Some(surface.obj.id()));
 }
 
+// An input method's candidate window (an override-redirect popup) for a
+// notification panel with focus goes on the overlay too, over the panel and
+// the bars: as a popup of a window below them, it would be hidden.
+#[test]
+fn input_method_window_over_focused_panel() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_, overlay) = new_overlay_output(&mut f, 0, 0);
+
+    let bar = Window::new(1);
+    let bar_dims = WindowDims {
+        x: 1650,
+        y: 2020,
+        width: 538,
+        height: 56,
+    };
+    let bar_id = new_notification(&mut f, &comp, bar, bar_dims);
+    f.testwl.configure_popup(bar_id);
+    f.run();
+    f.run();
+
+    let panel = Window::new(2);
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: false,
+        dims: WindowDims {
+            x: 1600,
+            y: 1760,
+            width: 904,
+            height: 256,
+        },
+        fullscreen: false,
+    };
+    f.new_window(panel, false, data);
+    f.satellite
+        .set_window_role(panel, crate::xstate::WindowRole::Notification);
+    f.satellite.set_transient_for(panel, bar);
+    f.map_window(&comp, panel, &surface.obj, &buffer);
+    f.run();
+    let panel_id = f.check_new_surface();
+    f.testwl.configure_popup(panel_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+
+    let candidates = Window::new(3);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 1640,
+        y: 1860,
+        width: 180,
+        height: 560,
+    };
+    let data = WindowData {
+        mapped: true,
+        dims,
+        fullscreen: false,
+    };
+    f.new_window(candidates, true, data);
+    f.map_window(&comp, candidates, &surface.obj, &buffer);
+    f.run();
+    let id = f.check_new_surface();
+    let popup = f.testwl.get_surface_data(id).unwrap().popup();
+    assert_eq!(popup.layer_parent, Some(overlay));
+    assert_eq!(
+        popup.positioner_state.offset,
+        testwl::Vec2 { x: 820, y: 930 }
+    );
+}
+
 // Without wlr-layer-shell, a notification window is a toplevel of its size.
 #[test]
 fn notification_window_without_layer_shell() {
