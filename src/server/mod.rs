@@ -1154,6 +1154,15 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         }
 
+        if overlay::is_overlay_popup(&win, data) {
+            let entity = data.entity();
+            if let Some(output) = self.overlay_output_moved_to(entity, dims) {
+                drop(win);
+                self.move_overlay_popup(entity, output);
+                return;
+            }
+        }
+
         let mut query = data.query::<(&mut SurfaceRole, &SurfaceScaleFactor)>();
         let Some((role, scale_factor)) = query.get() else {
             return;

@@ -36,7 +36,10 @@ use wayland_protocols::{
             zwp_locked_pointer_v1::ZwpLockedPointerV1,
             zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
         },
-        relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        relative_pointer::zv1::client::{
+            zwp_relative_pointer_manager_v1::{self, ZwpRelativePointerManagerV1},
+            zwp_relative_pointer_v1::ZwpRelativePointerV1,
+        },
         tablet::zv2::client::{
             zwp_tablet_manager_v2::{self, ZwpTabletManagerV2},
             zwp_tablet_pad_group_v2::{
@@ -267,6 +270,7 @@ struct TestFixture<C: XConnection> {
     xwls_display: Display<InnerServerState<C::X11Selection>>,
     surface_serial: u64,
     registry: TestObject<WlRegistry>,
+    relative_pointer_man: Option<TestObject<ZwpRelativePointerManagerV1>>,
 }
 
 static INIT: std::sync::Once = std::sync::Once::new();
@@ -400,6 +404,7 @@ impl EarlyTestFixture {
             xwls_display: display,
             surface_serial: 1,
             registry,
+            relative_pointer_man: None,
         };
         f.run();
         f
@@ -413,6 +418,7 @@ impl EarlyTestFixture {
             xwls_display: self.xwls_display,
             surface_serial: self.surface_serial,
             registry: self.registry,
+            relative_pointer_man: self.relative_pointer_man,
         }
     }
 }
@@ -461,6 +467,9 @@ impl<C: XConnection> TestFixture<C> {
                     x if x == ZwpTabletManagerV2::interface().name => bind!(tablet_man),
                     x if x == ZwpPointerConstraintsV1::interface().name => {
                         bind!(pointer_constraints)
+                    }
+                    x if x == ZwpRelativePointerManagerV1::interface().name => {
+                        self.relative_pointer_man = Some(bind(&self.registry, name, version));
                     }
                     _ => {}
                 }
@@ -1778,6 +1787,92 @@ fn notification_window_pointer_follows_x_position() {
     assert_eq!(last_motion(&pointer), Some((26.0, 20.0)));
 }
 
+// The compositor moves a popup a while after X has moved its window, and gives
+// new pointer positions in it whenever it does, as if the pointer had moved.
+// Pointer positions in a notification window follow where the pointer is, by
+// its relative motion, and nothing else: a client dragging the window by the
+// pointer sees it where it is, as under X.
+#[test]
+fn notification_window_pointer_moves_with_the_hand() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let man = f
+        .relative_pointer_man
+        .take()
+        .expect("No relative pointer manager");
+    let _relative = TestObject::<ZwpRelativePointerV1>::from_request(
+        &man.obj,
+        zwp_relative_pointer_manager_v1::Request::GetRelativePointer {
+            pointer: pointer.obj.clone(),
+        },
+    );
+    new_overlay_output(&mut f, 0, 0);
+
+    let window = Window::new(1);
+    let dims = WindowDims {
+        x: 1650,
+        y: 2020,
+        width: 538,
+        height: 56,
+    };
+    let id = new_notification(&mut f, &comp, window, dims);
+    f.testwl.configure_popup(id);
+    f.run();
+    f.run();
+
+    let run = |f: &mut TestFixture<FakeXConnection>| {
+        f.run();
+        f.run();
+        f.run();
+        std::mem::take(&mut *pointer.data.events.lock().unwrap())
+    };
+    let motions = |events: &[wl_pointer::Event]| {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                wl_pointer::Event::Motion {
+                    surface_x,
+                    surface_y,
+                    ..
+                } => Some((*surface_x, *surface_y)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let surface = f.testwl.get_surface_data(id).unwrap().surface.clone();
+    f.testwl.pointer().enter(1, &surface, 10.0, 10.0);
+    f.testwl.pointer().motion(1, 10.0, 10.0);
+    f.testwl.pointer().frame();
+    let events = run(&mut f);
+    let enter = events.iter().find_map(|event| match event {
+        wl_pointer::Event::Enter {
+            surface_x,
+            surface_y,
+            ..
+        } => Some((*surface_x, *surface_y)),
+        _ => None,
+    });
+    assert_eq!(enter, Some((20.0, 20.0)));
+
+    // Moved 6 left in X: the compositor gives the pointer where it was in the
+    // popup, then (once the popup has moved) 3 further in.
+    f.reconfigure_window(window, WindowDims { x: 1644, ..dims }, false);
+    for x in [10.0, 13.0] {
+        f.testwl.pointer().motion(2, x, 10.0);
+        f.testwl.pointer().frame();
+    }
+    assert_eq!(motions(&run(&mut f)), vec![]);
+
+    // The pointer moves 2 right.
+    f.testwl.pointer().motion(3, 15.0, 10.0);
+    f.testwl.relative_motion(2.0, 0.0);
+    f.testwl.pointer().frame();
+    assert_eq!(motions(&run(&mut f)), vec![(30.0, 20.0)]);
+}
+
 // A notification window goes on the overlay of the output it is on in X.
 #[test]
 fn notification_window_second_output() {
@@ -1805,6 +1900,54 @@ fn notification_window_second_output() {
     f.testwl.configure_popup(id);
     f.run();
     assert_eq!(f.connection().window(window).dims, dims);
+}
+
+// Moved onto another output, a notification window goes on that output's
+// overlay: the compositor keeps a popup on its parent's output, so it would
+// stay at the edge of the first one.
+#[test]
+fn notification_window_moves_to_another_output() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_, left) = new_overlay_output(&mut f, 0, 0);
+    let (_, right) = new_overlay_output(&mut f, 1920, 0);
+
+    let window = Window::new(1);
+    let dims = WindowDims {
+        x: 1650,
+        y: 2020,
+        width: 538,
+        height: 56,
+    };
+    let id = new_notification(&mut f, &comp, window, dims);
+    f.testwl.configure_popup(id);
+    f.run();
+    f.run();
+    assert_eq!(
+        f.testwl.get_surface_data(id).unwrap().popup().layer_parent,
+        Some(left)
+    );
+
+    let moved = WindowDims {
+        x: 3840 + 1650,
+        ..dims
+    };
+    f.reconfigure_window(window, moved, false);
+    f.run();
+    f.run();
+    let popup = f.testwl.get_surface_data(id).unwrap().popup();
+    assert_eq!(popup.layer_parent, Some(right));
+    assert_eq!(
+        popup.positioner_state.offset,
+        testwl::Vec2 { x: 825, y: 1010 }
+    );
+
+    f.testwl.configure_popup(id);
+    f.run();
+    f.run();
+    assert_eq!(window_dims(&f, window), moved);
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert!(data.buffer.is_some(), "popup lost its buffer");
 }
 
 // Without wlr-layer-shell, a notification window is a toplevel of its size.
