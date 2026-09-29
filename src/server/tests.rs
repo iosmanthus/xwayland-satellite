@@ -2060,6 +2060,129 @@ fn notification_panel_takes_focus_and_keys() {
     assert_eq!(left.map(|s| s.id()), Some(surface.obj.id()));
 }
 
+/// Maps a Feishu-like meeting panel transient for `parent`: a notification window
+/// without WM_HINTS, which takes focus as it shows.
+fn new_panel(
+    f: &mut TestFixture<FakeXConnection>,
+    comp: &Compositor,
+    panel: Window,
+    parent: Window,
+) -> (TestObject<WlSurface>, testwl::SurfaceId) {
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: false,
+        dims: WindowDims {
+            x: 1600,
+            y: 1760,
+            width: 904,
+            height: 256,
+        },
+        fullscreen: false,
+    };
+    f.new_window(panel, false, data);
+    f.satellite
+        .set_window_role(panel, crate::xstate::WindowRole::Notification);
+    f.satellite.set_transient_for(panel, parent);
+    f.map_window(comp, panel, &surface.obj, &buffer);
+    f.run();
+    let id = f.check_new_surface();
+    f.testwl.configure_popup(id);
+    f.run();
+    f.run();
+    (surface, id)
+}
+
+/// A meeting window with a panel open over it, and Feishu's main window beside it.
+fn panel_over_meeting(
+    f: &mut TestFixture<FakeXConnection>,
+    comp: &Compositor,
+) -> (Window, testwl::SurfaceId, Window, Window) {
+    let main = Window::new(1);
+    let (_, main_id) = f.create_toplevel(comp, main);
+    let meeting = Window::new(2);
+    f.create_toplevel(comp, meeting);
+    assert_eq!(f.connection().focused_window, Some(meeting));
+    let panel = Window::new(3);
+    new_panel(f, comp, panel, meeting);
+    assert_eq!(f.connection().focused_window, Some(panel));
+    (main, main_id, meeting, panel)
+}
+
+// Feishu closes a meeting panel the moment it loses focus. When the compositor
+// moves keyboard focus to another X window only because the pointer went over it
+// (focus follows the mouse, as niri can do), the panel keeps X focus; a click in
+// that window takes it there, as it would take it from a menu.
+#[test]
+fn panel_keeps_focus_the_pointer_moves() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let _pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let _keyboard =
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    new_overlay_output(&mut f, 0, 0);
+    let (main, main_id, _, panel) = panel_over_meeting(&mut f, &comp);
+
+    f.testwl.focus_toplevel(main_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+
+    let main_surface = f.testwl.get_surface_data(main_id).unwrap().surface.clone();
+    f.testwl.pointer().enter(20, &main_surface, 5.0, 5.0);
+    f.testwl.pointer().frame();
+    f.testwl.pointer().button(
+        21,
+        0,
+        0x110,
+        wayland_server::protocol::wl_pointer::ButtonState::Pressed,
+    );
+    f.testwl.pointer().frame();
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(main));
+}
+
+// When the panel goes away, focus goes to the window the compositor has focused.
+#[test]
+fn closed_panel_gives_focus_to_focused_window() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let _keyboard =
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    new_overlay_output(&mut f, 0, 0);
+    let (main, main_id, _, panel) = panel_over_meeting(&mut f, &comp);
+
+    f.testwl.focus_toplevel(main_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+
+    f.satellite.unmap_window(panel);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(main));
+}
+
+// Focus going to another client altogether takes it from the panel as before.
+#[test]
+fn panel_loses_focus_to_other_clients() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let _keyboard =
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    new_overlay_output(&mut f, 0, 0);
+    let (_, main_id, _, _) = panel_over_meeting(&mut f, &comp);
+
+    f.testwl.focus_toplevel(main_id);
+    f.run();
+    f.run();
+    f.testwl.unfocus_toplevel();
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, None);
+}
+
 // An input method's candidate window (an override-redirect popup) for a
 // notification panel with focus goes on the overlay too, over the panel and
 // the bars: as a popup of a window below them, it would be hidden.

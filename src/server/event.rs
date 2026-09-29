@@ -886,10 +886,19 @@ impl Event for client::wl_pointer::Event {
                     }
                     _ => None,
                 };
+                let pressed_window = matches!(current_surface, CurrentSurface::Xwayland(_))
+                    && button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
+                    && pressed_overlay.is_none();
                 server.button(serial, time, button, convert_wenum(button_state));
                 drop(query);
                 if pressed_overlay.is_some() {
                     state.overlay_pressed = pressed_overlay;
+                }
+                // A click in the window the compositor focused while a panel kept X focus:
+                // focus goes there now (see `panel_keeps_focus`).
+                if pressed_window && state.held_focus.is_some() {
+                    state.to_focus = state.held_focus.take();
+                    state.focused_overlay = None;
                 }
                 cmd.run_on(&mut state.world);
             }
@@ -972,15 +981,23 @@ impl Event for client::wl_keyboard::Event {
                     serial,
                 ));
                 let output_name = get_output_name(output, &state.world);
-                state.focused_overlay = None;
                 let window_data = data.get::<&WindowData>();
                 let has_take_focus = window_data.as_ref().is_some_and(|d| d.attrs.has_take_focus);
-                state.to_focus = Some(FocusData {
+                let focus = FocusData {
                     window: *window,
                     output_name,
                     is_popup: false,
                     has_take_focus,
-                });
+                };
+                if state.panel_keeps_focus() {
+                    // X focus stays with the panel, including from a window left just
+                    // before; this window gets it once the panel goes or is clicked away.
+                    state.held_focus = Some(focus);
+                    state.unfocus = false;
+                } else {
+                    state.focused_overlay = None;
+                    state.to_focus = Some(focus);
+                }
                 keyboard.enter(serial, surface, keys);
             }
             client::wl_keyboard::Event::Leave { serial, surface } => {
@@ -999,6 +1016,9 @@ impl Event for client::wl_keyboard::Event {
                 let Some((window, surface)) = query.as_mut().and_then(|q| q.get()) else {
                     return;
                 };
+                if state.held_focus.as_ref().map(|d| d.window) == Some(*window) {
+                    state.held_focus = None;
+                }
                 if state.to_focus.as_ref().map(|d| d.window) == Some(*window) {
                     state.to_focus.take();
                 } else {

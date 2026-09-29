@@ -547,6 +547,7 @@ impl<S: X11Selection> InnerServerState<S> {
             .insert_one(keyboard, OverlayKeyboard(entity))
             .unwrap();
         self.focused_overlay = Some(entity);
+        self.held_focus = None;
         true
     }
 
@@ -566,6 +567,19 @@ impl<S: X11Selection> InnerServerState<S> {
         self.unfocus = true;
     }
 
+    /// Whether the notification window with focus is a panel keeping it (see
+    /// `WindowAttributes::is_focused_panel`). Feishu closes its meeting panels the moment
+    /// they lose focus, so keyboard focus the compositor gives another X window only
+    /// because the pointer went over it (focus follows the mouse) is held until the panel
+    /// goes or a click in that window asks for it, as a menu would keep it.
+    pub(super) fn panel_keeps_focus(&self) -> bool {
+        self.focused_overlay.is_some_and(|entity| {
+            self.world
+                .get::<&WindowData>(entity)
+                .is_ok_and(|data| data.attrs.is_focused_panel())
+        })
+    }
+
     /// Takes keyboard focus from a notification window going away.
     pub(super) fn overlay_window_unmapped(&mut self, entity: Entity) {
         if self.overlay_pressed == Some(entity) {
@@ -573,6 +587,10 @@ impl<S: X11Selection> InnerServerState<S> {
         }
         if self.focused_overlay == Some(entity) {
             self.focused_overlay = None;
+            // Where the compositor has keyboard focus now.
+            if let Some(held) = self.held_focus.take() {
+                self.to_focus = Some(held);
+            }
         }
         let keyboards: Vec<Entity> = self
             .world
