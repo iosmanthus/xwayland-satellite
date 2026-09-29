@@ -610,9 +610,10 @@ impl<S: X11Selection> InnerServerState<S> {
 }
 
 /// Whether `entity` is a notification window made a popup of an overlay, which its
-/// client places.
+/// client places (not one made a popup of the window it is transient for).
 pub(super) fn is_overlay_popup(window: &WindowData, entity: hecs::EntityRef) -> bool {
     window.attrs.role == WindowRole::Notification
+        && entity.has::<OverlayParent>()
         && matches!(
             entity.get::<&SurfaceRole>().as_deref(),
             Some(SurfaceRole::Popup(_))
