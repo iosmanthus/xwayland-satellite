@@ -534,6 +534,9 @@ pub struct InnerServerState<S: X11Selection> {
     overlay_pressed: Option<Entity>,
     /// The notification window with focus, whose input method windows go over it.
     focused_overlay: Option<Entity>,
+    /// The window the compositor gave keyboard focus while a focused panel kept X focus,
+    /// to focus once the panel goes or a click asks for it (see `panel_keeps_focus`).
+    held_focus: Option<FocusData>,
     selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -664,6 +667,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             display,
             overlay_pressed: None,
             focused_overlay: None,
+            held_focus: None,
             world,
         };
         Self {
@@ -832,6 +836,8 @@ impl<C: XConnection> ServerState<C> {
                 }
             } else if self.unfocus {
                 self.connection.focus_window(x::WINDOW_NONE, None);
+                self.focused_overlay = None;
+                self.held_focus = None;
             }
             self.unfocus = false;
         }
