@@ -2092,6 +2092,33 @@ fn new_panel(
     (surface, id)
 }
 
+// A notification window transient for an ordinary window (Feishu's meeting panel
+// while its meeting window is up) is a popup of that window, placed from it: X has
+// toplevels at their output's corner, not where the compositor shows them, so the
+// overlay put the panel at the corner of the screen rather than over the window.
+#[test]
+fn notification_transient_for_toplevel_is_its_popup() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let meeting = Window::new(1);
+    f.create_toplevel(&comp, meeting);
+    let (_, panel_id) = new_panel(&mut f, &comp, Window::new(2), meeting);
+
+    let parent = f.connection().windows[&meeting].dims;
+    let scale = f.satellite.current_scale;
+    let popup = f.testwl.get_surface_data(panel_id).unwrap().popup();
+    assert_eq!(popup.layer_parent, None);
+    assert!(popup.parent.is_some());
+    assert_eq!(
+        popup.positioner_state.offset,
+        testwl::Vec2 {
+            x: ((1600 - i32::from(parent.x)) as f64 / scale) as i32,
+            y: ((1760 - i32::from(parent.y)) as f64 / scale) as i32,
+        }
+    );
+}
+
 /// A meeting window with a panel open over it, and Feishu's main window beside it.
 fn panel_over_meeting(
     f: &mut TestFixture<FakeXConnection>,

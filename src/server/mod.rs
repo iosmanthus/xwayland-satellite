@@ -1487,6 +1487,16 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
     /// Creates the appropriate xdg role (toplevel or popup) for the given window.
     /// Returns `true` if the created window is a toplevel.
+    /// Whether `window` has an xdg_toplevel.
+    fn is_toplevel(&self, window: x::Window) -> bool {
+        self.windows.get(&window).is_some_and(|&entity| {
+            matches!(
+                self.world.get::<&SurfaceRole>(entity).as_deref(),
+                Ok(SurfaceRole::Toplevel(Some(_)))
+            )
+        })
+    }
+
     fn create_role_window(&mut self, window: x::Window, entity: Entity) -> bool {
         let xdg_surface;
         let mut popup_for = None;
@@ -1513,7 +1523,22 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 }
             }
             if window_data.attrs.role == WindowRole::Notification {
-                overlay_on = self.overlay_output_for(window_data.attrs.dims);
+                // Transient for an ordinary window (Feishu's meeting panels, while its
+                // meeting window is up): a popup of it, placed from it, as X has
+                // toplevels at their output's corner rather than where the compositor
+                // shows them. The rest (the meeting bars, and what is transient for
+                // them) go on the overlay, placed by their X position.
+                match window_data
+                    .attrs
+                    .transient_for
+                    .filter(|&parent| self.is_toplevel(parent))
+                {
+                    Some(parent) => {
+                        popup_for = Some(parent);
+                        overlay_on = None;
+                    }
+                    None => overlay_on = self.overlay_output_for(window_data.attrs.dims),
+                }
             }
             splash = window_data.attrs.role.is_fixed_size();
 
