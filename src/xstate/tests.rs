@@ -168,6 +168,48 @@ mod window_role_heuristics {
         }
     }
 
+    // Feishu's incoming call bar: a frameless normal window that asks to stay
+    // above the others, at a place of its choosing (the top-right corner of a
+    // screen). As a toplevel the compositor centred it; like a notification it
+    // goes where Feishu puts it.
+    #[test]
+    fn feishu_incoming_call_bar() {
+        let win_types = WindowTypes::new();
+        let call_bar = |position: bool, keep_above: bool, has_transient_for: bool, framed: bool| {
+            let mut hints = WmNormalHints::new().min_size(736, 172);
+            if position {
+                hints = hints.program_pos(3056, 48);
+            }
+            let decorations: u32 = if framed { 1 } else { 0 };
+            WindowRoleHeuristics {
+                window_types: vec![win_types.normal],
+                motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, decorations, 0, 0].as_slice())),
+                wm_normal_hints: Some(hints.into()),
+                wm_class: Some("Meeting".into()),
+                keep_above,
+                has_transient_for,
+                ..Default::default()
+            }
+        };
+        assert_eq!(
+            call_bar(true, true, false, false).guess_window_role(&win_types),
+            WindowRole::Notification
+        );
+        // Without any one of those it is an ordinary window.
+        for (position, keep_above, has_transient_for, framed) in [
+            (false, true, false, false),
+            (true, false, false, false),
+            (true, true, true, false),
+            (true, true, false, true),
+        ] {
+            assert_eq!(
+                call_bar(position, keep_above, has_transient_for, framed)
+                    .guess_window_role(&win_types),
+                WindowRole::Toplevel
+            );
+        }
+    }
+
     // https://github.com/Supreeeme/xwayland-satellite/issues/112
     #[test]
     fn reaper_main_app() {
@@ -276,6 +318,7 @@ mod window_role_heuristics {
             wm_class: Some("wechat".into()),
             wm_normal_hints: Some(wm_normal_hints.into()),
             accepts_input: None,
+            keep_above: false,
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -298,6 +341,7 @@ mod window_role_heuristics {
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             wm_class: Some("Godot".into()),
             accepts_input: None,
+            keep_above: false,
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
