@@ -667,6 +667,10 @@ impl XState {
             .get_net_wm_window_types(window)?
             .unwrap_or_else(Vec::new);
 
+        let keep_above = self
+            .get_net_wm_state(window)?
+            .is_some_and(|state| state.contains(&self.atoms.net_wm_state_above));
+
         let heuristics = WindowRoleHeuristics {
             override_redirect,
             has_transient_for: transient_for.is_some(),
@@ -675,6 +679,7 @@ impl XState {
             wm_class,
             wm_normal_hints: size_hints,
             accepts_input,
+            keep_above,
         };
         let role = heuristics.guess_window_role(&self.window_atoms);
         if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
@@ -809,6 +814,12 @@ impl XState {
         PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
+    fn get_net_wm_state(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
+        let cookie = self.get_property_cookie(window, self.atoms.net_wm_state, x::ATOM_ATOM, 10);
+        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
+    }
+
     fn get_override_redirect(&self, window: x::Window) -> XResult<bool> {
         self.connection
             .wait_for_reply(
@@ -912,6 +923,7 @@ xcb::atoms_struct! {
         net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
+        net_wm_state_above => b"_NET_WM_STATE_ABOVE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
@@ -994,12 +1006,16 @@ pub struct WinSize {
 pub struct WmNormalHints {
     pub min_size: Option<WinSize>,
     pub max_size: Option<WinSize>,
+    /// Whether the window asks for a position of its own (user or program specified).
+    pub position: bool,
 }
 
 impl From<&[u32]> for WmNormalHints {
     fn from(value: &[u32]) -> Self {
         let mut ret = Self::default();
         let flags = WmSizeHintsFlags::from_bits_truncate(value[0]);
+        ret.position =
+            flags.intersects(WmSizeHintsFlags::UserPosition | WmSizeHintsFlags::ProgramPosition);
 
         if flags.contains(WmSizeHintsFlags::ProgramMinSize) {
             ret.min_size = Some(WinSize {
@@ -1171,6 +1187,8 @@ struct WindowRoleHeuristics {
     wm_normal_hints: Option<WmNormalHints>,
     /// The input field of WM_HINTS, if the window has them.
     accepts_input: Option<bool>,
+    /// Whether _NET_WM_STATE asks to keep the window above others.
+    keep_above: bool,
 }
 impl WindowRoleHeuristics {
     fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
@@ -1213,7 +1231,19 @@ impl WindowRoleHeuristics {
 
         for ty in window_types {
             match ty {
-                x if x == window_atoms.normal => return WindowRole::Toplevel,
+                x if x == window_atoms.normal => {
+                    // A frameless window asking to stay above the others, at a place
+                    // of its choosing, for no window in particular, is a floating
+                    // widget (Feishu's incoming call bar, its screen sharing preview).
+                    // As a toplevel the compositor would place it, centred; like a
+                    // notification it goes where its client puts it.
+                    let positioned = self.wm_normal_hints.is_some_and(|hints| hints.position);
+                    if self.keep_above && positioned && motif_no_decor && !self.has_transient_for
+                    {
+                        return WindowRole::Notification;
+                    }
+                    return WindowRole::Toplevel;
+                }
                 x if x == window_atoms.dialog => {
                     return WindowRole::new_basic(
                         self.has_transient_for && motif_no_decor && forced_size,
@@ -1258,7 +1288,8 @@ impl WindowRoleHeuristics {
     fn log(&self, connection: &xcb::Connection) -> String {
         format!(
             "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
-            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}, accepts_input: {:?}",
+            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}, accepts_input: {:?}, \
+            keep_above: {}",
             self.override_redirect,
             self.has_transient_for,
             self.window_types
@@ -1269,6 +1300,7 @@ impl WindowRoleHeuristics {
             self.wm_class,
             self.wm_normal_hints,
             self.accepts_input,
+            self.keep_above,
         )
     }
 }

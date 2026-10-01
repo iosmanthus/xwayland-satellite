@@ -1510,6 +1510,7 @@ fn splash_window_fixed_size_scaled() {
         crate::xstate::WmNormalHints {
             min_size: None,
             max_size: None,
+            position: false,
         },
     );
     f.run();
@@ -2335,6 +2336,7 @@ fn size_hints_scaled_at_creation() {
     f.satellite.set_size_hints(
         window,
         super::WmNormalHints {
+            position: false,
             min_size: Some(WinSize {
                 width: 1600,
                 height: 1290,
@@ -3585,6 +3587,7 @@ fn toplevel_size_limits_scaled() {
     f.satellite.set_size_hints(
         window,
         super::WmNormalHints {
+            position: false,
             min_size: Some(WinSize {
                 width: 20,
                 height: 20,
@@ -3614,6 +3617,7 @@ fn toplevel_size_limits_scaled() {
     f.satellite.set_size_hints(
         window,
         super::WmNormalHints {
+            position: false,
             min_size: Some(WinSize {
                 width: 40,
                 height: 40,
@@ -3645,6 +3649,7 @@ fn toplevel_size_limits_scaled() {
     f.satellite.set_size_hints(
         window,
         super::WmNormalHints {
+            position: false,
             min_size: Some(WinSize {
                 width: 40,
                 height: 40,
@@ -3661,6 +3666,7 @@ fn toplevel_size_limits_scaled() {
     f.satellite.set_size_hints(
         window,
         super::WmNormalHints {
+            position: false,
             min_size: None,
             max_size: None,
         },
@@ -4357,6 +4363,7 @@ fn decorations_max_height_int_max() {
     f.satellite.set_size_hints(
         window,
         super::WmNormalHints {
+            position: false,
             min_size: None,
             max_size: Some(WinSize {
                 width: i32::MAX,
