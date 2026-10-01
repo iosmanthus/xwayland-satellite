@@ -170,8 +170,8 @@ mod window_role_heuristics {
 
     // Feishu's incoming call bar: a frameless normal window that asks to stay
     // above the others, at a place of its choosing (the top-right corner of a
-    // screen). As a toplevel the compositor centred it; like a notification it
-    // goes where Feishu puts it.
+    // screen), with a minimum size only. As a toplevel the compositor centred
+    // it; like a notification it goes where Feishu puts it.
     #[test]
     fn feishu_incoming_call_bar() {
         let win_types = WindowTypes::new();
@@ -195,6 +195,23 @@ mod window_role_heuristics {
             call_bar(true, true, false, false).guess_window_role(&win_types),
             WindowRole::Notification
         );
+        // Feishu's participant view while sharing the screen is the same kind of
+        // window but of a fixed size: a tile to move about, a window.
+        let participants = WindowRoleHeuristics {
+            window_types: vec![win_types.normal],
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(
+                WmNormalHints::new()
+                    .program_pos(3424, 80)
+                    .min_size(320, 238)
+                    .max_size(320, 238)
+                    .into(),
+            ),
+            keep_above: true,
+            ..Default::default()
+        };
+        assert_eq!(participants.guess_window_role(&win_types), WindowRole::Toplevel);
+
         // Without any one of those it is an ordinary window.
         for (position, keep_above, has_transient_for, framed) in [
             (false, true, false, false),

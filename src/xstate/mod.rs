@@ -1233,12 +1233,18 @@ impl WindowRoleHeuristics {
             match ty {
                 x if x == window_atoms.normal => {
                     // A frameless window asking to stay above the others, at a place
-                    // of its choosing, for no window in particular, is a floating
-                    // widget (Feishu's incoming call bar, its screen sharing preview).
-                    // As a toplevel the compositor would place it, centred; like a
-                    // notification it goes where its client puts it.
+                    // of its choosing, for no window in particular, is a prompt
+                    // (Feishu's incoming call bar). As a toplevel the compositor would
+                    // place it, centred; like a notification it goes where its client
+                    // puts it. Not one of a fixed size: that is a tile the user keeps
+                    // and moves about (Feishu's participant view while sharing the
+                    // screen), which the compositor floats as a window anyway.
                     let positioned = self.wm_normal_hints.is_some_and(|hints| hints.position);
-                    if self.keep_above && positioned && motif_no_decor && !self.has_transient_for
+                    if self.keep_above
+                        && positioned
+                        && motif_no_decor
+                        && !forced_size
+                        && !self.has_transient_for
                     {
                         return WindowRole::Notification;
                     }
