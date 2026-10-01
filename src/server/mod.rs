@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::{
     Connection, EventQueue, Proxy, QueueHandle,
@@ -118,6 +118,9 @@ struct WindowAttributes {
     transient_for: Option<x::Window>,
     /// Whether the window has WM_HINTS, which `accepts_input` comes from.
     has_wm_hints: bool,
+    /// Whether a notification window showed right after a click in a window of its
+    /// client, which opened it (see `InnerServerState::clicked_window`).
+    opened_by_click: bool,
 }
 
 impl WindowAttributes {
@@ -126,12 +129,12 @@ impl WindowAttributes {
     }
 
     /// Whether a notification window is a panel to focus as it is shown: one transient for
-    /// another (Feishu closes its meeting panels a moment after opening them unless they get
-    /// focus). Feishu sets no WM_HINTS on them; without them, window managers take a window
-    /// to accept input.
+    /// another, or opened by a click (Feishu closes its meeting panels a moment after opening
+    /// them unless they get focus). Feishu sets no WM_HINTS on them; without them, window
+    /// managers take a window to accept input.
     fn is_focused_panel(&self) -> bool {
         self.role == WindowRole::Notification
-            && self.transient_for.is_some()
+            && (self.transient_for.is_some() || self.opened_by_click)
             && !self.override_redirect
             && (self.has_take_focus || self.accepts_input || !self.has_wm_hints)
     }
@@ -532,6 +535,8 @@ pub struct InnerServerState<S: X11Selection> {
     display: client::wl_display::WlDisplay,
     /// The notification window the pointer was last pressed in, to give keys to.
     overlay_pressed: Option<Entity>,
+    /// The X window the pointer was last pressed in, and when.
+    last_press: Option<(Entity, Instant)>,
     /// The notification window with focus, whose input method windows go over it.
     focused_overlay: Option<Entity>,
     /// The window the compositor gave keyboard focus while a focused panel kept X focus,
@@ -666,6 +671,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             layer_shell,
             display,
             overlay_pressed: None,
+            last_press: None,
             focused_overlay: None,
             held_focus: None,
             world,
@@ -1487,6 +1493,23 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
     /// Creates the appropriate xdg role (toplevel or popup) for the given window.
     /// Returns `true` if the created window is a toplevel.
+    /// The window of the same X client as `window` that the pointer was pressed in just
+    /// before it showed, if any: a notification window that shows then, with no
+    /// WM_TRANSIENT_FOR, is a panel that click opened (Feishu's participant panel, from
+    /// its participant view).
+    fn clicked_window(&self, window: x::Window) -> Option<x::Window> {
+        // Clients get resource IDs from disjoint ranges; Xwayland, like Xorg, gives each
+        // the top bits.
+        const RESOURCE_ID_MASK: u32 = 0x1f_ffff;
+        let (entity, at) = self.last_press?;
+        if at.elapsed() > Duration::from_millis(1500) {
+            return None;
+        }
+        let clicked = *self.world.get::<&x::Window>(entity).ok()?;
+        let client = |w: x::Window| xcb::Xid::resource_id(&w) & !RESOURCE_ID_MASK;
+        (clicked != window && client(clicked) == client(window)).then_some(clicked)
+    }
+
     /// Whether `window` has an xdg_toplevel.
     fn is_toplevel(&self, window: x::Window) -> bool {
         self.windows.get(&window).is_some_and(|&entity| {
@@ -1501,6 +1524,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let xdg_surface;
         let mut popup_for = None;
         let mut overlay_on = None;
+        let mut opened_by_click = false;
         let mut fullscreen = false;
         let splash;
 
@@ -1528,9 +1552,19 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 // toplevels at their output's corner rather than where the compositor
                 // shows them. The rest (the meeting bars, and what is transient for
                 // them) go on the overlay, placed by their X position.
+                // Without WM_TRANSIENT_FOR, a click in a window of its client just before
+                // it showed opened it: a popup of that window too, if it is ordinary.
+                let clicked = window_data
+                    .attrs
+                    .transient_for
+                    .is_none()
+                    .then(|| self.clicked_window(window))
+                    .flatten();
+                opened_by_click = clicked.is_some();
                 match window_data
                     .attrs
                     .transient_for
+                    .or(clicked)
                     .filter(|&parent| self.is_toplevel(parent))
                 {
                     Some(parent) => {
@@ -1580,6 +1614,13 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         client.commit();
         self.world.insert(entity, (role,)).unwrap();
+        if opened_by_click {
+            self.world
+                .get::<&mut WindowData>(entity)
+                .unwrap()
+                .attrs
+                .opened_by_click = true;
+        }
 
         is_toplevel
     }

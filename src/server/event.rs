@@ -886,13 +886,23 @@ impl Event for client::wl_pointer::Event {
                     }
                     _ => None,
                 };
-                let pressed_window = matches!(current_surface, CurrentSurface::Xwayland(_))
-                    && button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
-                    && pressed_overlay.is_none();
+                let pressed = match current_surface {
+                    CurrentSurface::Xwayland(entity)
+                        if button_state
+                            == WEnum::Value(client::wl_pointer::ButtonState::Pressed) =>
+                    {
+                        Some(*entity)
+                    }
+                    _ => None,
+                };
+                let pressed_window = pressed.is_some() && pressed_overlay.is_none();
                 server.button(serial, time, button, convert_wenum(button_state));
                 drop(query);
                 if pressed_overlay.is_some() {
                     state.overlay_pressed = pressed_overlay;
+                }
+                if let Some(entity) = pressed {
+                    state.last_press = Some((entity, std::time::Instant::now()));
                 }
                 // A click in the window the compositor focused while a panel kept X focus:
                 // focus goes there now (see `panel_keeps_focus`).

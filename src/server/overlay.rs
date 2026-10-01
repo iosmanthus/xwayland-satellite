@@ -587,9 +587,22 @@ impl<S: X11Selection> InnerServerState<S> {
         }
         if self.focused_overlay == Some(entity) {
             self.focused_overlay = None;
-            // Where the compositor has keyboard focus now.
+            // Back where the compositor has keyboard focus: the window it focused while
+            // the panel kept X focus, else the last one that had it.
             if let Some(held) = self.held_focus.take() {
                 self.to_focus = Some(held);
+            } else if let Some(window) = self.last_focused_toplevel {
+                let has_take_focus = self
+                    .windows
+                    .get(&window)
+                    .and_then(|&e| self.world.get::<&WindowData>(e).ok())
+                    .is_some_and(|data| data.attrs.has_take_focus);
+                self.to_focus = Some(super::FocusData {
+                    window,
+                    output_name: None,
+                    is_popup: false,
+                    has_take_focus,
+                });
             }
         }
         let keyboards: Vec<Entity> = self
