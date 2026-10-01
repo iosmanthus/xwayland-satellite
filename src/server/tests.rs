@@ -2120,6 +2120,118 @@ fn notification_transient_for_toplevel_is_its_popup() {
     );
 }
 
+/// Clicks the middle of `surface` with the left button.
+fn click(f: &mut TestFixture<FakeXConnection>, surface: &wayland_server::protocol::wl_surface::WlSurface) {
+    f.testwl.pointer().enter(30, surface, 5.0, 5.0);
+    f.testwl.pointer().frame();
+    f.testwl.pointer().button(
+        31,
+        0,
+        0x110,
+        wayland_server::protocol::wl_pointer::ButtonState::Pressed,
+    );
+    f.testwl.pointer().frame();
+    f.run();
+    f.run();
+}
+
+// Feishu's participant panel is a notification window with no WM_TRANSIENT_FOR,
+// shown when its participant view is clicked, and closed a second later unless
+// it gets focus. A notification window that shows right after a click in a
+// window of its client is a panel that click opened: it takes focus, and when
+// the click was in an ordinary window, it is a popup of that window.
+#[test]
+fn notification_opened_by_click_is_a_panel() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let _pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let _keyboard =
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    new_overlay_output(&mut f, 0, 0);
+    let view = Window::new(1);
+    let (_, view_id) = f.create_toplevel(&comp, view);
+    let view_surface = f.testwl.get_surface_data(view_id).unwrap().surface.clone();
+    click(&mut f, &view_surface);
+
+    let panel = Window::new(2);
+    let dims = WindowDims {
+        x: 224,
+        y: 20,
+        width: 672,
+        height: 1072,
+    };
+    let panel_id = new_notification(&mut f, &comp, panel, dims);
+    f.testwl.configure_popup(panel_id);
+    f.run();
+    f.run();
+    let popup = f.testwl.get_surface_data(panel_id).unwrap().popup();
+    assert_eq!(popup.layer_parent, None);
+    assert!(popup.parent.is_some());
+    assert_eq!(f.connection().focused_window, Some(panel));
+}
+
+// When such a panel (or a toast a click happened to precede) goes, focus goes back
+// to the window it was opened from rather than nowhere.
+#[test]
+fn closed_clicked_panel_gives_focus_back() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let _pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let _keyboard =
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    new_overlay_output(&mut f, 0, 0);
+    let view = Window::new(1);
+    let (_, view_id) = f.create_toplevel(&comp, view);
+    let view_surface = f.testwl.get_surface_data(view_id).unwrap().surface.clone();
+    click(&mut f, &view_surface);
+
+    let panel = Window::new(2);
+    let dims = WindowDims {
+        x: 224,
+        y: 20,
+        width: 672,
+        height: 1072,
+    };
+    let panel_id = new_notification(&mut f, &comp, panel, dims);
+    f.testwl.configure_popup(panel_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+
+    f.satellite.unmap_window(panel);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(view));
+}
+
+// Without a click before it (a toast), it stays a notification on the overlay,
+// and takes no focus.
+#[test]
+fn notification_without_click_stays_on_overlay() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_, overlay) = new_overlay_output(&mut f, 0, 0);
+    let view = Window::new(1);
+    f.create_toplevel(&comp, view);
+
+    let toast = Window::new(2);
+    let dims = WindowDims {
+        x: 1656,
+        y: 96,
+        width: 528,
+        height: 144,
+    };
+    let toast_id = new_notification(&mut f, &comp, toast, dims);
+    f.testwl.configure_popup(toast_id);
+    f.run();
+    f.run();
+    let popup = f.testwl.get_surface_data(toast_id).unwrap().popup();
+    assert_eq!(popup.layer_parent, Some(overlay));
+    assert_eq!(f.connection().focused_window, Some(view));
+}
+
 /// A meeting window with a panel open over it, and Feishu's main window beside it.
 fn panel_over_meeting(
     f: &mut TestFixture<FakeXConnection>,
