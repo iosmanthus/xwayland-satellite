@@ -1173,7 +1173,7 @@ impl WindowRole {
 }
 
 // An escape hatch for Yabridge, which needs to be a pop-up despite lack of an indicator
-const POPUP_WM_CLASSES: [&str; 2] = [
+pub(crate) const POPUP_WM_CLASSES: [&str; 2] = [
     "yabridge-host.exe",    // wine 10.xx
     "yabridge-host.exe.so", // wine 9.xx
 ];

@@ -1,8 +1,14 @@
+mod classify;
 mod clientside;
+mod context;
 mod decoration;
 mod dispatch;
 mod event;
+mod focus;
+pub(crate) mod model;
 mod overlay;
+#[cfg(test)]
+mod scenario;
 pub(crate) mod selection;
 #[cfg(test)]
 mod tests;
