@@ -414,6 +414,20 @@ struct GlobalOutputOffset {
     y: GlobalOutputOffsetDimension,
 }
 
+impl GlobalOutputOffset {
+    /// Where an output at logical position (`x`, `y`) starts in X's coordinate space.
+    /// X runs in physical pixels (outputs are given their native mode as their size), so
+    /// their positions scale too: left in logical pixels, an output beside or below
+    /// another on a scaled setup would overlap it, and a position on one could not be
+    /// told from a position on the other.
+    fn x_origin(&self, x: i32, y: i32, scale: f64) -> (i32, i32) {
+        (
+            ((x - self.x.value) as f64 * scale).round() as i32,
+            ((y - self.y.value) as f64 * scale).round() as i32,
+        )
+    }
+}
+
 /// The state of the X11 connection before XState has been fully initialized.
 /// It implements XConnection minimally, gracefully doing nothing but logging the called functions.
 pub struct NoConnection<S: X11Selection + 'static> {
@@ -680,6 +694,7 @@ impl<C: XConnection> ServerState<C> {
                 event::update_global_output_offset(
                     e,
                     &state.global_output_offset,
+                    state.current_scale,
                     &state.world,
                     &mut self.connection,
                 );
@@ -737,6 +752,10 @@ impl<C: XConnection> ServerState<C> {
                 }
 
                 debug!("Using new scale {scale}");
+                // Output positions in X are scaled; lay them out again.
+                if scale != self.current_scale {
+                    self.global_offset_updated = true;
+                }
                 self.new_scale = Some(scale);
                 self.current_scale = scale;
             }

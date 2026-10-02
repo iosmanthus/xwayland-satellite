@@ -1896,6 +1896,41 @@ fn output_offset_multi_output_xdg() {
     assert!(output_obj_2.data.events.lock().unwrap().is_empty());
 }
 
+// X runs in physical pixels, so on a scaled setup output positions scale with
+// the output sizes. Two 1920x1080 (logical) outputs side by side at 2x are 7680
+// wide in X; unscaled, the right one would start at 1920, inside the left one.
+#[test]
+fn output_offset_scaled_xdg() {
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output();
+
+    let (left_obj, left) = f.new_output(0, 0);
+    let left_xdg = f.create_xdg_output(&man, left_obj.obj.clone());
+    let (right_obj, right) = f.new_output(1920, 0);
+    let right_xdg = f.create_xdg_output(&man, right_obj.obj.clone());
+    f.run();
+    for output in [&left, &right] {
+        output.scale(2);
+        output.done();
+    }
+    f.testwl.move_xdg_output(&left, 0, 0);
+    f.testwl.move_xdg_output(&right, 1920, 0);
+    f.run();
+    f.run();
+
+    let position = |xdg: &TestObject<ZxdgOutputV1>| {
+        std::mem::take(&mut *xdg.data.events.lock().unwrap())
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                zxdg_output_v1::Event::LogicalPosition { x, y } => Some((x, y)),
+                _ => None,
+            })
+    };
+    assert_eq!(position(&left_xdg), Some((0, 0)));
+    assert_eq!(position(&right_xdg), Some((3840, 0)));
+}
+
 #[test]
 fn output_offset_remove_output() {
     let (mut f, _) = TestFixture::new_with_compositor();
