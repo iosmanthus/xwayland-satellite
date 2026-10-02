@@ -185,6 +185,19 @@ struct SurfaceAttach {
     y: i32,
 }
 
+/// Size of a buffer, in buffer pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BufferSize {
+    width: i32,
+    height: i32,
+}
+
+/// Size of the buffer last attached to a surface.
+struct AttachedBufferSize(BufferSize);
+
+/// A surface Xwayland has made a cursor with `set_cursor`.
+struct CursorSurface;
+
 #[derive(PartialEq, Eq, Debug)]
 struct SurfaceSerial([u32; 2]);
 

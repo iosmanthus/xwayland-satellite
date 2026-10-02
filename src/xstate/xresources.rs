@@ -2,8 +2,23 @@ use super::XState;
 use log::warn;
 use xcb::x;
 
+/// The logical cursor size: our own XCURSOR_SIZE (the compositor's, when it
+/// spawns us), or 24.
+pub(super) fn logical_cursor_size() -> u32 {
+    std::env::var("XCURSOR_SIZE")
+        .ok()
+        .and_then(|size| size.parse().ok())
+        .filter(|size| *size > 0)
+        .unwrap_or(24)
+}
+
 impl XState {
-    pub(super) fn update_xft_dpi_resource(&self, dpi: i32) {
+    /// Sets the resources that follow the scale X clients render at. `Xcursor.size`
+    /// matters because clients render in physical pixels here and pick their
+    /// cursor images by size: at the logical size they would come out half as
+    /// big, or be upscaled by the compositor. A client's own XCURSOR_SIZE still
+    /// wins over the resource.
+    pub(super) fn update_scaled_resources(&self, dpi: i32, cursor_size: u32) {
         // Other clients may replace the resource database so don't cache its contents
         let reply = self
             .connection
@@ -26,35 +41,43 @@ impl XState {
             }
         };
 
-        let xft_dpi = format!("Xft.dpi:\t{dpi}");
-        let mut updated = Vec::with_capacity(resources.len() + xft_dpi.len() + 1);
-        let mut replaced = false;
+        let scaled: [(&[u8], String); 2] = [
+            (b"Xft.dpi", format!("Xft.dpi:\t{dpi}")),
+            (b"Xcursor.size", format!("Xcursor.size:\t{cursor_size}")),
+        ];
+        let mut updated = Vec::with_capacity(resources.len() + 64);
+        let mut replaced = [false; 2];
 
         for line in resources.split_inclusive(|byte| *byte == b'\n') {
             let resource_name = line
                 .iter()
                 .position(|byte| *byte == b':')
                 .map(|separator| line[..separator].trim_ascii());
-            match resource_name {
-                Some(b"Xft.dpi") => {
-                    if !replaced {
-                        updated.extend_from_slice(xft_dpi.as_bytes());
+            match scaled
+                .iter()
+                .position(|(name, _)| resource_name == Some(*name))
+            {
+                Some(i) => {
+                    if !replaced[i] {
+                        updated.extend_from_slice(scaled[i].1.as_bytes());
                         if line.ends_with(b"\n") {
                             updated.push(b'\n');
                         }
-                        replaced = true;
+                        replaced[i] = true;
                     }
                 }
-                _ => updated.extend_from_slice(line),
+                None => updated.extend_from_slice(line),
             }
         }
 
-        if !replaced {
-            if !updated.is_empty() && !updated.ends_with(b"\n") {
+        for (i, (_, resource)) in scaled.iter().enumerate() {
+            if !replaced[i] {
+                if !updated.is_empty() && !updated.ends_with(b"\n") {
+                    updated.push(b'\n');
+                }
+                updated.extend_from_slice(resource.as_bytes());
                 updated.push(b'\n');
             }
-            updated.extend_from_slice(xft_dpi.as_bytes());
-            updated.push(b'\n');
         }
 
         self.connection

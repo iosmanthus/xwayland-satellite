@@ -110,6 +110,8 @@ pub struct XState {
     wm_window: x::Window,
     selection_state: SelectionState,
     settings: Settings,
+    /// The logical cursor size, which X clients get scaled in `Xcursor.size`.
+    cursor_size: u32,
     max_req_bytes: usize,
 }
 
@@ -230,6 +232,7 @@ impl XState {
             window_atoms,
             selection_state,
             settings,
+            cursor_size: xresources::logical_cursor_size(),
             max_req_bytes,
         };
         r.create_ewmh_window();
