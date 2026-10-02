@@ -1444,6 +1444,75 @@ fn splash_window_fixed_size() {
     assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 400, y: 300 }));
 }
 
+// A fixed size is in logical pixels, whatever the scale, and it stays fixed
+// through the window's size hints changing and follows the client resizing
+// the window itself (a meeting bar whose timer grows).
+#[test]
+fn splash_window_fixed_size_scaled() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output) = f.new_output(0, 0);
+    output.scale(2);
+    output.done();
+    f.run();
+    f.run();
+
+    let window = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 0,
+        y: 0,
+        width: 1372,
+        height: 84,
+    };
+    let data = WindowData {
+        mapped: false,
+        dims,
+        fullscreen: false,
+    };
+    f.new_window(window, false, data);
+    f.satellite
+        .set_window_role(window, crate::xstate::WindowRole::Splash);
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+    let id = f.testwl.last_created_surface_id().unwrap();
+    f.testwl.move_surface_to_output(id, &output);
+    f.run();
+    f.run();
+
+    let fixed = |testwl: &testwl::Server, width, height| {
+        let toplevel = testwl.get_surface_data(id).unwrap().toplevel();
+        let size = Some(testwl::Vec2 {
+            x: width,
+            y: height,
+        });
+        assert_eq!((toplevel.min_size, toplevel.max_size), (size, size));
+    };
+    fixed(&f.testwl, 686, 42);
+
+    f.satellite.set_size_hints(
+        window,
+        crate::xstate::WmNormalHints {
+            min_size: None,
+            max_size: None,
+        },
+    );
+    f.run();
+    fixed(&f.testwl, 686, 42);
+
+    f.reconfigure_window(
+        window,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 1404,
+            height: 84,
+        },
+        false,
+    );
+    f.run();
+    fixed(&f.testwl, 702, 42);
+}
+
 trait SelectionTest {
     type SelectionType: SelectionType;
     fn mimes(testwl: &mut testwl::Server) -> Vec<String>;

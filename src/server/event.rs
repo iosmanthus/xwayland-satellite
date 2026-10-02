@@ -500,11 +500,35 @@ pub(super) fn update_surface_viewport(
     }
     debug!("{} viewport: {width}x{height}", surface.id());
 
-    if let Some(hints) = size_hints {
-        if let Some(data) = toplevel_data {
+    if let Some(data) = toplevel_data {
+        if window_data.attrs.role == WindowRole::Splash {
+            update_fixed_size(data, dims, scale_factor.0);
+        } else if let Some(hints) = size_hints {
             update_size_hints(data, hints, scale_factor.0);
-        };
+        }
     }
+}
+
+/// Pins a fixed-size window (see [`WindowRole::Splash`]) at its current size, which
+/// follows the client resizing the window itself; its size hints do not apply.
+pub(super) fn update_fixed_size(data: &ToplevelData, dims: &WindowDims, scale: f64) {
+    let decorations_height = if data.decoration.satellite.is_some() {
+        DecorationsDataSatellite::TITLEBAR_HEIGHT
+    } else {
+        0
+    };
+    let (width, height) = fixed_size(dims, scale);
+    let height = height.saturating_add(decorations_height);
+    data.toplevel.set_min_size(width, height);
+    data.toplevel.set_max_size(width, height);
+}
+
+/// `dims` in logical pixels, rounded up as the viewport is.
+pub(super) fn fixed_size(dims: &WindowDims, scale: f64) -> (i32, i32) {
+    (
+        (dims.width as f64 / scale).ceil() as i32,
+        (dims.height as f64 / scale).ceil() as i32,
+    )
 }
 
 pub(super) fn update_size_hints(data: &ToplevelData, hints: &WmNormalHints, scale: f64) {
