@@ -15,6 +15,7 @@ impl WindowTypes {
             utility: Atom::new(0x109),
             tooltip: Atom::new(0x109),
             combo: Atom::new(0x10a),
+            notification: Atom::new(0x10b),
         }
     }
 }
@@ -283,6 +284,22 @@ mod window_role_heuristics {
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
+    }
+
+    // Feishu's meeting control bars: NOTIFICATION windows, otherwise hinted like
+    // any top-level. They keep their size rather than being tiled.
+    #[test]
+    fn feishu_meeting_bar() {
+        let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new().min_size(562, 56);
+        let win = WindowRoleHeuristics {
+            window_types: vec![win_types.notification],
+            wm_normal_hints: Some(wm_normal_hints.into()),
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
+            wm_class: Some("Meeting".into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Splash);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/294
