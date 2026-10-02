@@ -60,6 +60,8 @@ default = []
 systemd = ["dep:sd-notify"]
 # load decoration font at runtime instead of embedding it into the executable
 fontconfig = ["dep:fontconfig"]
+# Write a JSONL trace of what satellite sees and does (docs/window-model/trace-schema.md).
+trace = []
 
 [dev-dependencies]
 rustix = { workspace = true, features = ["fs"] }

@@ -8,6 +8,8 @@
 //! corner that takes no input. A notification window becomes a popup of the overlay
 //! on its output, offset by its X position within that output.
 
+#[cfg(feature = "trace")]
+use super::GlobalName;
 use super::clientside::MyWorld;
 use super::event::{CurrentSurface, OutputDimensions, OutputScaleFactor, SurfaceScaleFactor};
 use super::{
@@ -33,6 +35,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 use wayland_server::protocol as server;
+#[cfg(feature = "trace")]
+use xcb::Xid;
 use xcb::x;
 
 /// User data of an overlay's surface, whose events are of no interest.
@@ -121,6 +125,15 @@ impl Overlay {
 }
 
 impl<S: X11Selection> InnerServerState<S> {
+    /// The output whose overlay owns `surface`, for resolving trace targets.
+    #[cfg(feature = "trace")]
+    pub(super) fn overlay_output_name(&self, surface: &WlSurface) -> Option<u32> {
+        self.world
+            .query::<(&Overlay, &GlobalName)>()
+            .iter()
+            .find_map(|(_, (overlay, name))| (overlay.surface == *surface).then_some(name.0))
+    }
+
     /// Gives an output its overlay, if the compositor has wlr-layer-shell.
     pub(super) fn add_overlay(&mut self, output: Entity) {
         let Some(layer_shell) = &self.layer_shell else {
@@ -201,6 +214,20 @@ impl<S: X11Selection> InnerServerState<S> {
         surface.commit();
         let xdg = self.xdg_wm_base.get_xdg_surface(&surface, &self.qh, entity);
         let popup = self.create_overlay_popup(entity, xdg, output);
+        #[cfg(feature = "trace")]
+        {
+            let window = self.world.get::<&x::Window>(entity).unwrap();
+            let output = self.world.get::<&GlobalName>(output).unwrap().0;
+            trace_event!("overlay_rehome", |l| l
+                .u("w", window.resource_id().into())
+                .u("o", output.into()));
+            trace_event!("role", |l| l
+                .u("w", window.resource_id().into())
+                .s("kind", "overlay_popup")
+                .opt_u("parent", None)
+                .u("o", output.into())
+                .s("why", "rehome"));
+        }
         let last = self
             .world
             .get::<&LastBuffer>(entity)
@@ -254,10 +281,23 @@ impl Event for zwlr_layer_surface_v1::Event {
                 };
                 let mut pool = state.world.get::<&mut SlotPool>(pool_entity).unwrap();
                 if let Ok(mut overlay) = state.world.get::<&mut Overlay>(target) {
+                    #[cfg(feature = "trace")]
+                    let was_mapped = overlay.mapped;
                     overlay.configure(serial, &mut pool);
+                    #[cfg(feature = "trace")]
+                    if !was_mapped && overlay.mapped {
+                        trace_event!("overlay_mapped", |l| l.u(
+                            "o",
+                            state.world.get::<&GlobalName>(target).unwrap().0.into()
+                        ));
+                    }
                 }
             }
             zwlr_layer_surface_v1::Event::Closed => {
+                trace_event!("overlay_closed", |l| l.u(
+                    "o",
+                    state.world.get::<&GlobalName>(target).unwrap().0.into()
+                ));
                 debug!("output overlay closed");
                 state.remove_overlay(target);
             }

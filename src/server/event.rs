@@ -212,6 +212,9 @@ impl SurfaceEvents {
 
                 let mut query = data.query::<(&x::Window, &mut WindowData)>();
                 if let Some((window, win_data)) = query.get() {
+                    trace_event!("surface_output", |l| l
+                        .u("w", window.resource_id().into())
+                        .u("o", output_data.get::<&GlobalName>().unwrap().0.into()));
                     let Some(dimensions) = output_data.get::<&OutputDimensions>() else {
                         return;
                     };
@@ -464,6 +467,8 @@ impl SurfaceEvents {
                 });
 
                 if first_configure {
+                    trace_event!("popup_configure", |l| l
+                        .u("w", data.get::<&x::Window>().unwrap().resource_id().into()));
                     let window_data = data.get::<&WindowData>().unwrap();
                     // Notifications do not take focus from what the user is in, but panels
                     // do (see WindowAttributes::is_focused_panel).
@@ -489,6 +494,8 @@ impl SurfaceEvents {
             }
             xdg_popup::Event::Repositioned { .. } => {}
             xdg_popup::Event::PopupDone => {
+                trace_event!("popup_done", |l| l
+                    .u("w", data.get::<&x::Window>().unwrap().resource_id().into()));
                 state
                     .connection
                     .unmap_window(*data.get::<&x::Window>().unwrap());
@@ -718,6 +725,7 @@ impl Event for client::wl_pointer::Event {
                 );
                 let mut overlay_pointer = Some(overlay_pointer);
                 let mut do_enter = || {
+                    trace_event!("ptr_enter", |l| l.u("w", window.resource_id().into()));
                     debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
                     server.enter(
                         serial,
@@ -833,6 +841,26 @@ impl Event for client::wl_pointer::Event {
                 button,
                 state: button_state,
             } => {
+                #[cfg(feature = "trace")]
+                if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed) {
+                    trace_event!("press", |l| {
+                        let (kind, entity) =
+                            match state.world.get::<&CurrentSurface>(target).as_deref() {
+                                Ok(CurrentSurface::Xwayland(entity)) => ("x", Some(*entity)),
+                                Ok(CurrentSurface::Decoration(parent)) => {
+                                    ("decoration", Some(*parent))
+                                }
+                                Err(_) => ("other", None),
+                            };
+                        let window = entity
+                            .and_then(|entity| state.world.get::<&x::Window>(entity).ok())
+                            .map(|window| window.resource_id().into());
+                        l.s("tk", kind)
+                            .opt_u("id", window)
+                            .u("serial", serial.into())
+                            .b("touch", false)
+                    });
+                }
                 if !handle_pending_enter(target, state, "click") {
                     return;
                 }
@@ -968,6 +996,22 @@ impl Event for client::wl_keyboard::Event {
                 surface,
                 keys,
             } => {
+                trace_event!("kb_enter", |l| {
+                    let (kind, id) = if surface.data::<overlay::OverlayMarker>().is_some() {
+                        (
+                            "overlay",
+                            state.overlay_output_name(&surface).map(u64::from),
+                        )
+                    } else if let Some(window) = surface
+                        .data::<Entity>()
+                        .and_then(|entity| state.world.get::<&x::Window>(*entity).ok())
+                    {
+                        ("x", Some(window.resource_id().into()))
+                    } else {
+                        ("other", None)
+                    };
+                    l.s("tk", kind).opt_u("id", id).u("serial", serial.into())
+                });
                 if surface.data::<overlay::OverlayMarker>().is_some() {
                     drop(keyboard);
                     let seat = data.get::<&client::wl_seat::WlSeat>().as_deref().cloned();
@@ -1020,6 +1064,22 @@ impl Event for client::wl_keyboard::Event {
                 keyboard.enter(serial, surface, keys);
             }
             client::wl_keyboard::Event::Leave { serial, surface } => {
+                trace_event!("kb_leave", |l| {
+                    let (kind, id) = if surface.data::<overlay::OverlayMarker>().is_some() {
+                        (
+                            "overlay",
+                            state.overlay_output_name(&surface).map(u64::from),
+                        )
+                    } else if let Some(window) = surface
+                        .data::<Entity>()
+                        .and_then(|entity| state.world.get::<&x::Window>(*entity).ok())
+                    {
+                        ("x", Some(window.resource_id().into()))
+                    } else {
+                        ("other", None)
+                    };
+                    l.s("tk", kind).opt_u("id", id).u("serial", serial.into())
+                });
                 if surface.data::<overlay::OverlayMarker>().is_some() {
                     drop(keyboard);
                     state.overlay_keyboard_leave(target, serial);
@@ -1051,6 +1111,12 @@ impl Event for client::wl_keyboard::Event {
                 key,
                 state: key_state,
             } => {
+                trace_event!("key", |l| l
+                    .b(
+                        "pressed",
+                        key_state == WEnum::Value(client::wl_keyboard::KeyState::Pressed)
+                    )
+                    .u("serial", serial.into()));
                 state.last_kb_serial = Some((
                     data.get::<&client::wl_seat::WlSeat>()
                         .as_deref()
@@ -1095,6 +1161,29 @@ impl Event for client::wl_touch::Event {
                 x,
                 y,
             } => {
+                trace_event!("press", |l| {
+                    let (kind, window) = if let Some(window) = surface
+                        .data::<Entity>()
+                        .and_then(|entity| state.world.get::<&x::Window>(*entity).ok())
+                    {
+                        ("x", Some(window.resource_id().into()))
+                    } else if let Some(&DecorationMarker { parent }) = surface.data() {
+                        (
+                            "decoration",
+                            state
+                                .world
+                                .get::<&x::Window>(parent)
+                                .ok()
+                                .map(|window| window.resource_id().into()),
+                        )
+                    } else {
+                        ("other", None)
+                    };
+                    l.s("tk", kind)
+                        .opt_u("id", window)
+                        .u("serial", serial.into())
+                        .b("touch", true)
+                });
                 let mut cmd = CommandBuffer::new();
                 {
                     let connection = &mut state.connection;

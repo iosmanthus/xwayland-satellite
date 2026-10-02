@@ -100,6 +100,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 use wayland_server::protocol as server;
 use wl_drm::client::wl_drm::WlDrm;
+#[cfg(feature = "trace")]
+use xcb::Xid;
 use xcb::x;
 
 use super::selection::SourceKind;
@@ -649,6 +651,7 @@ impl ActivationHandler for MyWorld {
     type RequestData = ActivationData;
 
     fn new_token(&mut self, token: String, data: &Self::RequestData) {
+        trace_event!("token_done", |l| l.u("w", data.window.resource_id().into()));
         self.pending_activations.push((data.window, token));
     }
 }

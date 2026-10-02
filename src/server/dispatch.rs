@@ -1652,10 +1652,25 @@ impl<S: X11Selection> Dispatch<XwaylandSurfaceV1, Entity> for InnerServerState<S
                     let win = data.get::<&x::Window>().as_deref().copied().unwrap();
                     state.windows.insert(win, *entity);
                     debug!("associate {surface_id} with {win:?} (serial {serial:?})");
-                    if data.get::<&WindowData>().unwrap().mapped
-                        && state.create_role_window(win, *entity)
-                    {
-                        state.activate_window(win);
+                    let (mapped, _dims) = {
+                        let window_data = data.get::<&WindowData>().unwrap();
+                        (window_data.mapped, window_data.attrs.dims)
+                    };
+                    if mapped {
+                        #[cfg(feature = "trace")]
+                        state.trace_outputs();
+                        trace_event!("role_create", |l| l.u("w", win.resource_id().into()).ints(
+                            "geom",
+                            &[
+                                _dims.x.into(),
+                                _dims.y.into(),
+                                _dims.width.into(),
+                                _dims.height.into()
+                            ]
+                        ));
+                        if state.create_role_window(win, *entity) {
+                            state.activate_window(win);
+                        }
                     }
                 } else {
                     state.world.insert(*entity, (serial,)).unwrap();

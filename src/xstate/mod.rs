@@ -390,6 +390,9 @@ impl XState {
                         );
                     } else {
                         debug!("destroying window since its parent is no longer root!");
+                        trace_event!("destroy", |l| l
+                            .u("w", e.window().resource_id().into())
+                            .b("reparent", true));
                         server_state.destroy_window(e.window());
                         ignored_windows.push(e.window());
                     }
@@ -432,6 +435,7 @@ impl XState {
                     server_state.reconfigure_window(e);
                 }
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
+                    trace_event!("unmap", |l| l.u("w", e.window().resource_id().into()));
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
                     let active_win = self
@@ -468,6 +472,9 @@ impl XState {
                     ));
                 }
                 xcb::Event::X(x::Event::DestroyNotify(e)) => {
+                    trace_event!("destroy", |l| l
+                        .u("w", e.window().resource_id().into())
+                        .b("reparent", false));
                     debug!("destroying window {:?}", e.window());
                     server_state.destroy_window(e.window());
                 }
@@ -564,6 +571,7 @@ impl XState {
                 }
             }
             x if x == self.atoms.active_win => {
+                trace_event!("active_req", |l| l.u("w", e.window().resource_id().into()));
                 server_state.activate_window(e.window());
             }
             x if x == self.atoms.moveresize => {
@@ -644,7 +652,8 @@ impl XState {
             server_state.set_size_hints(window, hints);
         }
 
-        if let Some(protocols) = self.get_protocols(window)? {
+        let protocols = self.get_protocols(window)?;
+        if let Some(protocols) = protocols.as_ref() {
             server_state.set_take_focus(window, protocols.contains(&self.atoms.wm_take_focus));
         }
 
@@ -674,9 +683,9 @@ impl XState {
         let heuristics = WindowRoleHeuristics {
             override_redirect,
             has_transient_for: transient_for.is_some(),
-            window_types,
+            window_types: window_types.clone(),
             motif_wm_hints,
-            wm_class,
+            wm_class: wm_class.clone(),
             wm_normal_hints: size_hints,
             accepts_input,
             keep_above,
@@ -693,6 +702,84 @@ impl XState {
         if let Some(parent) = transient_for.and_then(|t| (!role.is_popup()).then_some(t)) {
             server_state.set_transient_for(window, parent);
         }
+
+        trace_event!("map", |l| {
+            let names = |atom: &x::Atom| {
+                let t = &self.window_atoms;
+                match *atom {
+                    a if a == t.normal => "NORMAL",
+                    a if a == t.dialog => "DIALOG",
+                    a if a == t.utility => "UTILITY",
+                    a if a == t.splash => "SPLASH",
+                    a if a == t.menu => "MENU",
+                    a if a == t.popup_menu => "POPUP_MENU",
+                    a if a == t.dropdown_menu => "DROPDOWN_MENU",
+                    a if a == t.tooltip => "TOOLTIP",
+                    a if a == t.drag_n_drop => "DND",
+                    a if a == t.combo => "COMBO",
+                    a if a == t.notification => "NOTIFICATION",
+                    _ => "OTHER",
+                }
+            };
+            let types: Vec<&str> = window_types.iter().map(names).collect();
+            let input = match accepts_input {
+                None => "absent",
+                Some(true) => "true",
+                Some(false) => "false",
+            };
+            let has = |atom| protocols.as_ref().is_some_and(|p| p.contains(&atom));
+            let mask = self.connection.get_setup().resource_id_mask();
+            let geom = server_state.window_dims(window).unwrap_or_default();
+            l.u("w", window.resource_id().into())
+                .b("or", override_redirect)
+                .strs("types", &types)
+                .opt_u(
+                    "motif_f",
+                    motif_wm_hints
+                        .and_then(|m| m.functions)
+                        .map(|f| f.bits().into()),
+                )
+                .opt_u(
+                    "motif_d",
+                    motif_wm_hints
+                        .and_then(|m| m.decorations)
+                        .map(|d| d.bits().into()),
+                )
+                .opt_s("class", wm_class.as_deref())
+                .opt_ints(
+                    "min",
+                    size_hints
+                        .and_then(|h| h.min_size)
+                        .map(|s| [s.width.into(), s.height.into()])
+                        .as_ref()
+                        .map(|a| &a[..]),
+                )
+                .opt_ints(
+                    "max",
+                    size_hints
+                        .and_then(|h| h.max_size)
+                        .map(|s| [s.width.into(), s.height.into()])
+                        .as_ref()
+                        .map(|a| &a[..]),
+                )
+                .b("pos", size_hints.is_some_and(|h| h.position))
+                .s("input", input)
+                .b("above", keep_above)
+                .opt_u("transient", transient_for.map(|w| w.resource_id().into()))
+                .b("take_focus", has(self.atoms.wm_take_focus))
+                .b("delete", has(self.atoms.wm_delete_window))
+                .ints(
+                    "geom",
+                    &[
+                        geom.x.into(),
+                        geom.y.into(),
+                        geom.width.into(),
+                        geom.height.into(),
+                    ],
+                )
+                .u("client", (window.resource_id() & !mask).into())
+                .s("guess", &format!("{role:?}"))
+        });
 
         Ok(())
     }
@@ -869,6 +956,9 @@ impl XState {
         match event.atom() {
             x if x == x::ATOM_WM_HINTS => {
                 let hints = unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window)).unwrap();
+                trace_event!("hints", |l| l
+                    .u("w", window.resource_id().into())
+                    .s("input", if hints.accepts_input { "true" } else { "false" }));
                 server_state.set_win_hints(window, hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
@@ -1413,6 +1503,18 @@ impl XConnection for RealConnection {
         window: x::Window,
         dims: crate::server::PendingSurfaceState,
     ) -> bool {
+        trace_event!("x_call", |l| l
+            .s("call", "set_window_dims")
+            .u("w", window.resource_id().into())
+            .ints(
+                "rect",
+                &[
+                    i64::from(dims.x),
+                    i64::from(dims.y),
+                    i64::from(dims.width),
+                    i64::from(dims.height)
+                ]
+            ));
         trace!("set window dimensions {window:?} {dims:?}");
         unwrap_or_skip_bad_window!(
             self.connection.send_and_check_request(&x::ConfigureWindow {
@@ -1430,6 +1532,10 @@ impl XConnection for RealConnection {
     }
 
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool) {
+        trace_event!("x_call", |l| l
+            .s("call", "set_fullscreen")
+            .u("w", window.resource_id().into())
+            .b("on", fullscreen));
         let data = if fullscreen {
             std::slice::from_ref(&self.atoms.wm_fullscreen)
         } else {
@@ -1451,6 +1557,10 @@ impl XConnection for RealConnection {
     }
 
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>) {
+        trace_event!("x_call", |l| l
+            .s("call", "focus_window")
+            .u("w", window.resource_id().into())
+            .opt_s("output", output_name.as_deref()));
         trace!("{window:?} {output_name:?}");
         if let Err(e) = self.connection.send_and_check_request(&x::SetInputFocus {
             focus: window,
@@ -1515,6 +1625,9 @@ impl XConnection for RealConnection {
     }
 
     fn send_take_focus(&mut self, window: x::Window) {
+        trace_event!("x_call", |l| l
+            .s("call", "send_take_focus")
+            .u("w", window.resource_id().into()));
         let resource_id = self.atoms.wm_take_focus.resource_id();
         let data = [resource_id, x::CURRENT_TIME, 0, 0, 0];
         let event = &x::ClientMessageEvent::new(
@@ -1531,6 +1644,9 @@ impl XConnection for RealConnection {
     }
 
     fn close_window(&mut self, window: x::Window) {
+        trace_event!("x_call", |l| l
+            .s("call", "close_window")
+            .u("w", window.resource_id().into()));
         let cookie = self.connection.send_request(&x::GetProperty {
             window,
             delete: false,
@@ -1566,6 +1682,9 @@ impl XConnection for RealConnection {
     }
 
     fn unmap_window(&mut self, window: x::Window) {
+        trace_event!("x_call", |l| l
+            .s("call", "unmap_window")
+            .u("w", window.resource_id().into()));
         unwrap_or_skip_bad_window_ret!(
             self.connection
                 .send_and_check_request(&x::UnmapWindow { window })
@@ -1573,6 +1692,9 @@ impl XConnection for RealConnection {
     }
 
     fn raise_to_top(&mut self, window: x::Window) {
+        trace_event!("x_call", |l| l
+            .s("call", "raise_to_top")
+            .u("w", window.resource_id().into()));
         unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
             &x::ConfigureWindow {
                 window,

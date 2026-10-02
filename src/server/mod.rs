@@ -78,6 +78,8 @@ use wayland_server::{
     },
 };
 use wl_drm::{client::wl_drm::WlDrm as WlDrmClient, server::wl_drm::WlDrm as WlDrmServer};
+#[cfg(feature = "trace")]
+use xcb::Xid;
 use xcb::x;
 
 impl From<&x::CreateNotifyEvent> for WindowDims {
@@ -512,6 +514,8 @@ impl<C: XConnection> DerefMut for ServerState<C> {
 pub struct InnerServerState<S: X11Selection> {
     dh: DisplayHandle,
     windows: HashMap<x::Window, Entity>,
+    #[cfg(feature = "trace")]
+    traced_outputs: HashMap<u32, ([i64; 4], [i64; 2])>,
     pids: HashSet<u32>,
 
     world: MyWorld,
@@ -634,6 +638,8 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
 
         let inner = InnerServerState {
             windows: HashMap::new(),
+            #[cfg(feature = "trace")]
+            traced_outputs: HashMap::new(),
             pids: HashSet::new(),
             client,
             queue,
@@ -848,6 +854,10 @@ impl<C: XConnection> ServerState<C> {
             self.unfocus = false;
         }
 
+        #[cfg(feature = "trace")]
+        self.trace_outputs();
+        trace_event!("batch_end");
+
         self.handle_selection_events();
         self.handle_activations();
         if let Err(e) = self.queue.flush() {
@@ -898,6 +908,41 @@ impl<C: XConnection> ServerState<C> {
 }
 
 impl<S: X11Selection + 'static> InnerServerState<S> {
+    /// The X geometry satellite has for `window` (for the trace).
+    #[cfg(feature = "trace")]
+    pub fn window_dims(&self, window: x::Window) -> Option<WindowDims> {
+        let id = self.windows.get(&window).copied()?;
+        Some(self.world.get::<&WindowData>(id).ok()?.attrs.dims)
+    }
+
+    /// Writes `output` lines for outputs whose X geometry or mode changed since last written.
+    #[cfg(feature = "trace")]
+    pub(super) fn trace_outputs(&mut self) {
+        let current: Vec<(u32, [i64; 4], [i64; 2])> = self
+            .world
+            .query::<(&WlOutput, &GlobalName, &OutputDimensions)>()
+            .iter()
+            .map(|(_, (_, name, dims))| {
+                let (x, y) = self.output_x_origin(dims);
+                let (width, height) = dims.x_size();
+                (
+                    name.0,
+                    [x.into(), y.into(), width.into(), height.into()],
+                    [dims.width.into(), dims.height.into()],
+                )
+            })
+            .collect();
+        for (name, rect, mode) in current {
+            if self.traced_outputs.get(&name) != Some(&(rect, mode)) {
+                self.traced_outputs.insert(name, (rect, mode));
+                trace_event!("output", |l| l
+                    .u("o", name.into())
+                    .ints("rect", &rect)
+                    .ints("mode", &mode));
+            }
+        }
+    }
+
     pub fn clientside_fd(&self) -> BorrowedFd<'_> {
         self.queue.as_fd()
     }
@@ -917,6 +962,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     fn remove_output(&mut self, global: GlobalName) {
+        trace_event!("output_removed", |l| l.u("o", global.0.into()));
+        #[cfg(feature = "trace")]
+        self.traced_outputs.remove(&global.0);
         let query = self
             .world
             .query_mut::<(&WlOutput, &GlobalName)>()
@@ -1621,6 +1669,28 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 .attrs
                 .opened_by_click = true;
         }
+
+        trace_event!("role", |l| {
+            let (kind, parent, o) = match (&overlay_on, &popup_for) {
+                (Some(output), _) => (
+                    "overlay_popup",
+                    None,
+                    self.world
+                        .get::<&GlobalName>(*output)
+                        .ok()
+                        .map(|n| u64::from(n.0)),
+                ),
+                (None, Some(parent)) => ("popup", Some(u64::from(parent.resource_id())), None),
+                (None, None) if fullscreen => ("fullscreen", None, None),
+                (None, None) if splash => ("fixed_toplevel", None, None),
+                (None, None) => ("toplevel", None, None),
+            };
+            l.u("w", window.resource_id().into())
+                .s("kind", kind)
+                .opt_u("parent", parent)
+                .opt_u("o", o)
+                .s("why", "create")
+        });
 
         is_toplevel
     }
