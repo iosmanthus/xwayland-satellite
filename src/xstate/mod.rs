@@ -1411,6 +1411,11 @@ impl XConnection for RealConnection {
         }
 
         if let Some(name) = output_name {
+            // Xwayland names an output XWAYLANDn until the compositor gives its name, and
+            // naming it changes no screen resources: look the outputs up again first.
+            if !self.outputs.contains_key(&name) {
+                self.update_outputs(self.root_window());
+            }
             let Some(output) = self.outputs.get(&name).copied() else {
                 warn!("Couldn't find output {name}, primary output will be wrong");
                 return;
