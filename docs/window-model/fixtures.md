@@ -35,6 +35,10 @@ Checks:
   batch" (`expect(&[])`) and "`XFocus` of the same window again" differ.
 - `expect_role(w, role)`: `w`'s classification has this role (outputs untouched).
 - `expect_panel(w)`: the focus machine's panel slot holds `w` (`None`: empty).
+- `skip()`: forgets the outputs since the previous check unchecked (for fixtures that pin
+  roles only).
+- `focused_toplevel(id)`: maps toplevel `id`, moves the compositor's focus onto it as niri
+  does after the activation satellite asks for, and checks X focus follows.
 
 Output constructors: `xf(w)` (SetInput, primary None), `xf_on(w, o)`, `xf_take(w)`,
 `xf_take_on(w, o)`, `xf_none()`, `route(w)`, `unroute()`, `token(w, KbTarget)`.
