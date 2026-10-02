@@ -8,6 +8,7 @@ workspace = true
 
 [dependencies]
 wayland-protocols = { workspace = true, features = ["server", "staging", "unstable"] }
+wayland-protocols-wlr = { workspace = true, features = ["server"] }
 wayland-server.workspace = true
 wl_drm = { path = "../wl_drm" }
 rustix = { workspace = true, features = ["pipe"] }

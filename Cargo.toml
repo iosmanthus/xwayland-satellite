@@ -4,6 +4,7 @@ members = ["macros", "testwl", "wl_drm"]
 [workspace.dependencies]
 wayland-client = "0.31.11"
 wayland-protocols = "0.32.9"
+wayland-protocols-wlr = "0.3.9"
 wayland-scanner = "0.31.7"
 wayland-server = "0.31.10"
 rustix = "1.1.2"
@@ -35,6 +36,7 @@ bitflags = "2.5.0"
 rustix = { workspace = true, features = ["event"] }
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client", "server", "staging", "unstable"] }
+wayland-protocols-wlr = { workspace = true, features = ["client"] }
 wayland-server.workspace = true
 xcb = { version = "1.7.0", features = ["composite", "randr", "res"] }
 wl_drm = { path = "wl_drm" }

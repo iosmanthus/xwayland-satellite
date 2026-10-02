@@ -60,7 +60,12 @@ use wayland_protocols::{
         },
     },
 };
+use wayland_protocols_wlr::layer_shell::v1::server::{
+    zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
+};
 use wayland_server::backend::GlobalId;
+use wayland_server::protocol::wl_region::WlRegion;
 use wayland_server::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_server::protocol::wl_subsurface::WlSubsurface;
 use wayland_server::{
@@ -125,6 +130,7 @@ impl SurfaceData {
             SurfaceRole::Popup(p) => &p.xdg,
             SurfaceRole::Subsurface(_) => panic!("subsurface doesn't have an XdgSurface"),
             SurfaceRole::Cursor => panic!("cursor surface doesn't have an XdgSurface"),
+            SurfaceRole::Layer(_) => panic!("layer surface doesn't have an XdgSurface"),
         }
     }
 
@@ -140,6 +146,12 @@ impl SurfaceData {
             other => panic!("Surface role was not popup: {other:?}"),
         }
     }
+    pub fn layer(&self) -> &LayerSurface {
+        match self.role.as_ref().expect("Surface missing role") {
+            SurfaceRole::Layer(l) => l,
+            other => panic!("Surface role was not layer surface: {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -148,6 +160,7 @@ pub enum SurfaceRole {
     Popup(Popup),
     Cursor,
     Subsurface(Subsurface),
+    Layer(LayerSurface),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -170,9 +183,26 @@ pub struct Toplevel {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Popup {
     pub xdg: XdgSurfaceData,
-    pub parent: XdgSurface,
+    /// The parent given at creation, which a layer surface's popup does without.
+    pub parent: Option<XdgSurface>,
+    /// The layer surface that took the popup as its own.
+    pub layer_parent: Option<SurfaceId>,
     pub popup: XdgPopup,
     pub positioner_state: PositionerState,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct LayerSurface {
+    pub layer_surface: ZwlrLayerSurfaceV1,
+    pub output: Option<WlOutput>,
+    pub layer: zwlr_layer_shell_v1::Layer,
+    pub namespace: String,
+    pub size: Vec2,
+    pub anchor: zwlr_layer_surface_v1::Anchor,
+    pub exclusive_zone: i32,
+    pub keyboard_interactivity: zwlr_layer_surface_v1::KeyboardInteractivity,
+    pub last_configure_serial: Option<u32>,
+    pub acked_serial: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -923,6 +953,41 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    pub fn enable_layer_shell(&mut self) {
+        self.dh.create_global::<State, ZwlrLayerShellV1, _>(4, ());
+        self.display.flush_clients().unwrap();
+    }
+
+    /// The surfaces with a layer surface role.
+    pub fn layer_surfaces(&self) -> Vec<SurfaceId> {
+        let mut ids: Vec<_> = self
+            .state
+            .surfaces
+            .iter()
+            .filter(|(_, data)| matches!(data.role, Some(SurfaceRole::Layer(_))))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    #[track_caller]
+    pub fn configure_layer_surface(&mut self, surface_id: SurfaceId) {
+        let serial = self.state.configure_serial;
+        let surface = self.state.surfaces.get_mut(&surface_id).unwrap();
+        let Some(SurfaceRole::Layer(l)) = &mut surface.role else {
+            panic!(
+                "Surface does not have layer surface role: {:?}",
+                surface.role
+            );
+        };
+        l.layer_surface
+            .configure(serial, l.size.x as u32, l.size.y as u32);
+        l.last_configure_serial = Some(serial);
+        self.state.configure_serial += 1;
+        self.display.flush_clients().unwrap();
+    }
+
     pub fn enable_fractional_scale(&mut self) {
         self.dh
             .create_global::<State, WpFractionalScaleManagerV1, _>(1, ());
@@ -1502,6 +1567,121 @@ impl Dispatch<WlTouch, ()> for State {
     }
 }
 
+simple_global_dispatch!(ZwlrLayerShellV1);
+
+impl Dispatch<ZwlrLayerShellV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &ZwlrLayerShellV1,
+        request: <ZwlrLayerShellV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zwlr_layer_shell_v1::Request::GetLayerSurface {
+                id,
+                surface,
+                output,
+                layer,
+                namespace,
+            } => {
+                let surface_id = SurfaceId::from(&surface);
+                let layer_surface = data_init.init(id, surface_id);
+                let data = state.surfaces.get_mut(&surface_id).unwrap();
+                assert!(data.role.is_none(), "{surface:?} already has a role");
+                data.role = Some(SurfaceRole::Layer(LayerSurface {
+                    layer_surface,
+                    output,
+                    layer: layer.into_result().unwrap(),
+                    namespace,
+                    size: Vec2::default(),
+                    anchor: zwlr_layer_surface_v1::Anchor::empty(),
+                    exclusive_zone: 0,
+                    keyboard_interactivity: zwlr_layer_surface_v1::KeyboardInteractivity::None,
+                    last_configure_serial: None,
+                    acked_serial: None,
+                }));
+            }
+            zwlr_layer_shell_v1::Request::Destroy => {}
+            other => todo!("unhandled request {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<ZwlrLayerSurfaceV1, SurfaceId> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &ZwlrLayerSurfaceV1,
+        request: <ZwlrLayerSurfaceV1 as Resource>::Request,
+        surface_id: &SurfaceId,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use zwlr_layer_surface_v1::Request;
+        if let Request::GetPopup { popup } = &request {
+            let popup_id = *popup.data::<SurfaceId>().unwrap();
+            let data = state.surfaces.get_mut(&popup_id).unwrap();
+            let Some(SurfaceRole::Popup(p)) = &mut data.role else {
+                panic!("{popup_id:?} is not a popup: {:?}", data.role);
+            };
+            assert!(
+                p.parent.is_none(),
+                "layer surface popup already has a parent"
+            );
+            p.layer_parent = Some(*surface_id);
+            return;
+        }
+
+        let Some(data) = state.surfaces.get_mut(surface_id) else {
+            return;
+        };
+        let Some(SurfaceRole::Layer(l)) = &mut data.role else {
+            panic!("{surface_id:?} is not a layer surface: {:?}", data.role);
+        };
+        match request {
+            Request::SetSize { width, height } => {
+                l.size = Vec2 {
+                    x: width as i32,
+                    y: height as i32,
+                };
+            }
+            Request::SetAnchor { anchor } => {
+                l.anchor = anchor.into_result().unwrap();
+            }
+            Request::SetExclusiveZone { zone } => {
+                l.exclusive_zone = zone;
+            }
+            Request::SetKeyboardInteractivity {
+                keyboard_interactivity,
+            } => {
+                l.keyboard_interactivity = keyboard_interactivity.into_result().unwrap();
+            }
+            Request::AckConfigure { serial } => {
+                assert!(l.last_configure_serial.is_some_and(|s| s >= serial));
+                l.acked_serial = Some(serial);
+            }
+            Request::SetMargin { .. } | Request::SetLayer { .. } | Request::Destroy => {}
+            other => todo!("unhandled request {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<WlRegion, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &WlRegion,
+        _: <WlRegion as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+    }
+}
+
 impl Dispatch<XdgPopup, SurfaceId> for State {
     fn request(
         state: &mut Self,
@@ -1697,7 +1877,8 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                 let p = Popup {
                     xdg: XdgSurfaceData::new(resource.clone()),
                     popup,
-                    parent: parent.unwrap(),
+                    parent,
+                    layer_parent: None,
                     positioner_state,
                 };
                 let data = state.surfaces.get_mut(surface_id).unwrap();
@@ -1969,6 +2150,9 @@ impl Dispatch<WlCompositor, ()> for State {
                 );
                 state.last_surface_id = Some(SurfaceId(id));
                 state.created_surfaces.push(SurfaceId(id));
+            }
+            proto::wl_compositor::Request::CreateRegion { id } => {
+                data_init.init(id, ());
             }
             _ => unreachable!(),
         }
