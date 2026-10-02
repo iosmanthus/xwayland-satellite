@@ -183,7 +183,9 @@ mod window_role_heuristics {
             let decorations: u32 = if framed { 1 } else { 0 };
             WindowRoleHeuristics {
                 window_types: vec![win_types.normal],
-                motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, decorations, 0, 0].as_slice())),
+                motif_wm_hints: Some(motif::Hints::from(
+                    [0x2_u32, 0, decorations, 0, 0].as_slice(),
+                )),
                 wm_normal_hints: Some(hints.into()),
                 wm_class: Some("Meeting".into()),
                 keep_above,
@@ -210,7 +212,10 @@ mod window_role_heuristics {
             keep_above: true,
             ..Default::default()
         };
-        assert_eq!(participants.guess_window_role(&win_types), WindowRole::Toplevel);
+        assert_eq!(
+            participants.guess_window_role(&win_types),
+            WindowRole::Toplevel
+        );
 
         // Without any one of those it is an ordinary window.
         for (position, keep_above, has_transient_for, framed) in [
