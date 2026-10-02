@@ -287,6 +287,7 @@ impl SurfaceEvents {
 
         let pending = xdg.pending.take();
         drop(xdg);
+        let mut placed = None;
 
         if let Some(pending) = pending {
             let mut query = data.query::<(
@@ -325,21 +326,28 @@ impl SurfaceEvents {
                 "configuring {} ({window:?}): {x}x{y}, {width}x{height}",
                 data.get::<&WlSurface>().unwrap().id(),
             );
-
-            window_data.attrs.dims = WindowDims {
-                x: x as i16,
-                y: y as i16,
-                width,
-                height,
-            };
-            let pending = PendingSurfaceState {
-                x,
-                y,
-                width: width as _,
-                height: height as _,
-            };
-            drop(query);
-            state.world.insert_one(target, pending).unwrap();
+            if data.has::<overlay::Placement>() {
+                // Its client places it, and X has it where the client asked. This answers a
+                // move the client may have followed with others already: putting the window
+                // here would move it back, and tell the client of a move it made itself.
+                placed = Some((x, y));
+                drop(query);
+            } else {
+                window_data.attrs.dims = WindowDims {
+                    x: x as i16,
+                    y: y as i16,
+                    width,
+                    height,
+                };
+                let pending = PendingSurfaceState {
+                    x,
+                    y,
+                    width: width as _,
+                    height: height as _,
+                };
+                drop(query);
+                state.world.insert_one(target, pending).unwrap();
+            }
             update_surface_viewport(&state.world, state.world.query_one(target).unwrap());
         }
 
@@ -363,6 +371,17 @@ impl SurfaceEvents {
             cmd.remove_one::<client::wl_callback::WlCallback>(target);
         }
         surface.commit();
+        if let Some((x, y)) = placed {
+            // Done once the compositor has handled the commit, and placed the popup.
+            state.display.sync(
+                &state.qh,
+                overlay::Placed {
+                    entity: target,
+                    x,
+                    y,
+                },
+            );
+        }
         cmd.run_on(&mut state.world);
     }
 
@@ -446,7 +465,10 @@ impl SurfaceEvents {
 
                 if first_configure {
                     let window_data = data.get::<&WindowData>().unwrap();
-                    if window_data.attrs.require_wm_focus() {
+                    // Notifications do not take focus from what the user is in.
+                    if window_data.attrs.require_wm_focus()
+                        && window_data.attrs.role != WindowRole::Notification
+                    {
                         let window = *data.get::<&x::Window>().unwrap();
                         state.inner.to_focus = Some(FocusData {
                             window,
@@ -501,7 +523,7 @@ pub(super) fn update_surface_viewport(
     debug!("{} viewport: {width}x{height}", surface.id());
 
     if let Some(data) = toplevel_data {
-        if window_data.attrs.role == WindowRole::Splash {
+        if window_data.attrs.role.is_fixed_size() {
             update_fixed_size(data, dims, scale_factor.0);
         } else if let Some(hints) = size_hints {
             update_size_hints(data, hints, scale_factor.0);
@@ -509,7 +531,7 @@ pub(super) fn update_surface_viewport(
     }
 }
 
-/// Pins a fixed-size window (see [`WindowRole::Splash`]) at its current size, which
+/// Pins a fixed-size window (see [`WindowRole::is_fixed_size`]) at its current size, which
 /// follows the client resizing the window itself; its size hints do not apply.
 pub(super) fn update_fixed_size(data: &ToplevelData, dims: &WindowDims, scale: f64) {
     let decorations_height = if data.decoration.satellite.is_some() {
@@ -575,7 +597,7 @@ impl Event for client::wl_seat::Event {
 }
 
 struct PendingEnter(client::wl_pointer::Event);
-enum CurrentSurface {
+pub(super) enum CurrentSurface {
     Xwayland(Entity),
     Decoration(Entity),
 }
@@ -675,14 +697,35 @@ impl Event for client::wl_pointer::Event {
                 cmd.insert(target, (*scale,));
 
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
+                let (offset_x, offset_y) =
+                    overlay::pointer_offset(&state.world, surface_entity.unwrap());
+                let overlay_pointer = overlay::overlay_pointer(
+                    &state.world,
+                    target,
+                    surface_entity.unwrap(),
+                    (
+                        surface_x * scale.0 + offset_x,
+                        surface_y * scale.0 + offset_y,
+                    ),
+                );
+                let mut overlay_pointer = Some(overlay_pointer);
                 let mut do_enter = || {
                     debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
-                    server.enter(serial, surface, surface_x * scale.0, surface_y * scale.0);
+                    server.enter(
+                        serial,
+                        surface,
+                        surface_x * scale.0 + offset_x,
+                        surface_y * scale.0 + offset_y,
+                    );
                     connection.raise_to_top(*window);
                     if !surface_is_popup {
                         state.last_hovered = Some(*window);
                     }
                     cmd.insert_one(target, CurrentSurface::Xwayland(surface_entity.unwrap()));
+                    match overlay_pointer.take().flatten() {
+                        Some(position) => cmd.insert_one(target, position),
+                        None => cmd.remove_one::<overlay::OverlayPointer>(target),
+                    }
                 };
 
                 if !surface_is_popup {
@@ -714,6 +757,7 @@ impl Event for client::wl_pointer::Event {
             }
             Self::Leave { serial, surface } => {
                 let _ = state.world.remove_one::<PendingEnter>(target);
+                let _ = state.world.remove_one::<overlay::OverlayPointer>(target);
                 if !surface.is_alive() {
                     return;
                 }
@@ -747,27 +791,33 @@ impl Event for client::wl_pointer::Event {
                 if !handle_pending_enter(target, state, "motion") {
                     return;
                 }
-                {
+                // Given from relative motion instead (see overlay::OverlayPointer).
+                if overlay::follows_relative_motion(&state.world, target) {
+                    return;
+                }
+                let (offset_x, offset_y) = {
                     let Ok(surface) = state.world.get::<&CurrentSurface>(target) else {
                         warn!("could not motion on surface: stale surface");
                         return;
                     };
-                    if let CurrentSurface::Decoration(parent) = &*surface {
-                        decoration::handle_pointer_motion(state, *parent, surface_x, surface_y);
-                        return;
+                    match *surface {
+                        CurrentSurface::Decoration(parent) => {
+                            decoration::handle_pointer_motion(state, parent, surface_x, surface_y);
+                            return;
+                        }
+                        CurrentSurface::Xwayland(entity) => {
+                            overlay::pointer_offset(&state.world, entity)
+                        }
                     }
-                }
+                };
                 let (server, scale) = state
                     .world
                     .query_one_mut::<(&WlPointer, &SurfaceScaleFactor)>(target)
                     .unwrap();
-                trace!(
-                    target: "pointer_position",
-                    "pointer motion {} {}",
-                    surface_x * scale.0,
-                    surface_y * scale.0
-                );
-                server.motion(time, surface_x * scale.0, surface_y * scale.0);
+                let x = surface_x * scale.0 + offset_x;
+                let y = surface_y * scale.0 + offset_y;
+                trace!(target: "pointer_position", "pointer motion {x} {y}");
+                server.motion(time, x, y);
             }
             Self::Button {
                 serial,
@@ -1088,6 +1138,17 @@ pub(super) struct OutputDimensions {
     pub width: i32,
     pub height: i32,
     rotated_90: bool,
+}
+
+impl OutputDimensions {
+    /// The output's size in X: its mode, turned as the output is.
+    pub(super) fn x_size(&self) -> (i32, i32) {
+        if self.rotated_90 {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        }
+    }
 }
 
 impl Default for OutputDimensions {
@@ -1472,18 +1533,37 @@ impl Event for c_dmabuf::zwp_linux_dmabuf_feedback_v1::Event {
 
 impl Event for zwp_relative_pointer_v1::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let server = state.world.get::<&RelativePointerServer>(target).unwrap();
-        simple_event_shunt! {
-            server, self => [
-                RelativeMotion {
-                    utime_hi,
-                    utime_lo,
-                    dx,
-                    dy,
-                    dx_unaccel,
-                    dy_unaccel
-                }
-            ]
+        let motion = match self {
+            Self::RelativeMotion {
+                utime_hi,
+                utime_lo,
+                dx,
+                dy,
+                ..
+            } => Some((
+                (u64::from(utime_hi) << 32 | u64::from(utime_lo)) / 1000,
+                dx,
+                dy,
+            )),
+            _ => None,
+        };
+        {
+            let server = state.world.get::<&RelativePointerServer>(target).unwrap();
+            simple_event_shunt! {
+                server, self => [
+                    RelativeMotion {
+                        utime_hi,
+                        utime_lo,
+                        dx,
+                        dy,
+                        dx_unaccel,
+                        dy_unaccel
+                    }
+                ]
+            }
+        }
+        if let Some((time, dx, dy)) = motion {
+            state.overlay_relative_motion(target, time as u32, dx, dy);
         }
     }
 }

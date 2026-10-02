@@ -945,6 +945,7 @@ xcb::atoms_struct! {
         utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
         tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP" only_if_exists = false,
         combo => b"_NET_WM_WINDOW_TYPE_COMBO" only_if_exists = false,
+        notification => b"_NET_WM_WINDOW_TYPE_NOTIFICATION" only_if_exists = false,
     }
 }
 
@@ -1133,6 +1134,11 @@ pub enum WindowRole {
     /// A special type of toplevel which is constrained to a fixed size
     /// Commonly the window which displays while the main application is starting up
     Splash,
+    /// A window the application sizes and places itself: toasts, a video call's
+    /// floating control bars. Shown where it asks, as a popup of an overlay on its
+    /// output, when the compositor has wlr-layer-shell; otherwise a fixed-size
+    /// toplevel, like [`WindowRole::Splash`].
+    Notification,
 }
 impl WindowRole {
     /// Define a toplevel or popup with no special properties
@@ -1141,6 +1147,10 @@ impl WindowRole {
     }
     pub fn is_popup(&self) -> bool {
         *self == Self::Popup
+    }
+    /// Whether the window keeps the size its client gives it, as a toplevel.
+    pub fn is_fixed_size(&self) -> bool {
+        matches!(self, Self::Splash | Self::Notification)
     }
 }
 
@@ -1209,6 +1219,10 @@ impl WindowRoleHeuristics {
                     return WindowRole::new_basic(motif_no_decor && forced_size);
                 }
                 x if x == window_atoms.splash => return WindowRole::Splash,
+                // Notifications (toasts, a call's control bars) are laid out by the
+                // application at a size and place of its choosing. Tiled like a normal
+                // window, a strip a few dozen pixels tall fills a whole column.
+                x if x == window_atoms.notification => return WindowRole::Notification,
                 x if [
                     window_atoms.menu,
                     window_atoms.popup_menu,

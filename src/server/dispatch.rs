@@ -119,6 +119,10 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
                         .unwrap()
                 });
 
+                if data.has::<overlay::Placement>() {
+                    let last = overlay::LastBuffer(buffer.as_deref().cloned());
+                    cmd.insert_one(*entity, last);
+                }
                 if configured {
                     client.attach(buffer.as_deref(), x, y);
                 } else {
@@ -590,7 +594,13 @@ impl<S: X11Selection>
                     client.get_relative_pointer(&client_pointer, &state.qh, entity)
                 };
                 let server = data_init.init(id, entity);
-                state.world.spawn_at(entity, (server, client));
+                state.world.spawn_at(
+                    entity,
+                    (server, client, overlay::RelativeOf(pointer_entity)),
+                );
+                let _ = state
+                    .world
+                    .insert_one(pointer_entity, overlay::HasRelativeMotion);
             }
             _ => warn!("unhandled relative pointer request: {request:?}"),
         }
@@ -1545,6 +1555,7 @@ impl<S: X11Selection> GlobalDispatch<WlOutput, Global> for InnerServerState<S> {
                 GlobalName(data.name),
             ),
         );
+        state.add_overlay(entity);
         state.updated_outputs.push(entity);
     }
 }
