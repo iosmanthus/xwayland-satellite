@@ -10,12 +10,13 @@
 
 use super::clientside::MyWorld;
 use super::event::{CurrentSurface, OutputDimensions, OutputScaleFactor, SurfaceScaleFactor};
+use super::model::{OutputId, RawEvent, Role};
 use super::{
-    Event, InnerServerState, PopupData, ServerState, SurfaceRole, WindowData, WindowOutputOffset,
-    X11Selection, XdgSurfaceData,
+    Event, GlobalName, InnerServerState, PopupData, ServerState, SurfaceRole, WindowData,
+    WindowOutputOffset, X11Selection, XdgSurfaceData,
 };
 use crate::XConnection;
-use crate::xstate::{WindowDims, WindowRole};
+use crate::xstate::WindowDims;
 use hecs::{Entity, World};
 use log::{debug, warn};
 use smithay_client_toolkit::registry::SimpleGlobal;
@@ -120,7 +121,7 @@ impl Overlay {
     }
 }
 
-impl<S: X11Selection> InnerServerState<S> {
+impl<S: X11Selection + 'static> InnerServerState<S> {
     /// Gives an output its overlay, if the compositor has wlr-layer-shell.
     pub(super) fn add_overlay(&mut self, output: Entity) {
         let Some(layer_shell) = &self.layer_shell else {
@@ -136,32 +137,6 @@ impl<S: X11Selection> InnerServerState<S> {
         if let Ok(overlay) = self.world.remove_one::<Overlay>(output) {
             overlay.destroy();
         }
-    }
-
-    /// The output a notification window at `dims` (in X's coordinates) is on, if it
-    /// has a mapped overlay: the one under the window's centre, or failing that the
-    /// output of the window the user was last in.
-    pub(super) fn overlay_output_for(&self, dims: WindowDims) -> Option<Entity> {
-        let centre_x = dims.x as i32 + dims.width as i32 / 2;
-        let centre_y = dims.y as i32 + dims.height as i32 / 2;
-        let mut query = self.world.query::<(&OutputDimensions, &Overlay)>();
-        let under = query.iter().find_map(|(entity, (output, overlay))| {
-            let (x, y) = self.output_x_origin(output);
-            let (width, height) = output.x_size();
-            let inside = (x..x + width).contains(&centre_x) && (y..y + height).contains(&centre_y);
-            (overlay.mapped && inside).then_some(entity)
-        });
-        drop(query);
-
-        under.or_else(|| {
-            let window = self.last_focused_toplevel?;
-            let on_output = self
-                .world
-                .get::<&super::OnOutput>(self.windows[&window])
-                .ok()?;
-            let overlay = self.world.get::<&Overlay>(on_output.0).ok()?;
-            overlay.mapped.then_some(on_output.0)
-        })
     }
 
     /// The output under the centre of a window at `dims`, if it has a mapped overlay.
@@ -222,12 +197,25 @@ impl<S: X11Selection> InnerServerState<S> {
         self.world
             .insert_one(entity, SurfaceRole::Popup(Some(popup)))
             .unwrap();
+
+        let window = *self.world.get::<&x::Window>(entity).unwrap();
+        let output = OutputId(self.world.get::<&GlobalName>(output).unwrap().0);
+        self.feed(RawEvent::OverlayRehome { window, output });
     }
 
     /// Where `output` starts in X's coordinate space.
     pub(super) fn output_x_origin(&self, output: &OutputDimensions) -> (i32, i32) {
         self.global_output_offset
             .x_origin(output.x, output.y, self.current_scale)
+    }
+
+    /// The output whose overlay `surface` is.
+    pub(super) fn overlay_output_id(&self, surface: &WlSurface) -> Option<OutputId> {
+        self.world
+            .query::<(&Overlay, &GlobalName)>()
+            .iter()
+            .find(|(_, (overlay, _))| overlay.surface == *surface)
+            .map(|(_, (_, name))| OutputId(name.0))
     }
 }
 
@@ -253,12 +241,22 @@ impl Event for zwlr_layer_surface_v1::Event {
                     },
                 };
                 let mut pool = state.world.get::<&mut SlotPool>(pool_entity).unwrap();
+                let mut became_mapped = false;
                 if let Ok(mut overlay) = state.world.get::<&mut Overlay>(target) {
+                    let was_mapped = overlay.mapped;
                     overlay.configure(serial, &mut pool);
+                    became_mapped = !was_mapped && overlay.mapped;
+                }
+                drop(pool);
+                if became_mapped {
+                    let output = OutputId(state.world.get::<&GlobalName>(target).unwrap().0);
+                    state.feed(RawEvent::OverlayMapped { output });
                 }
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 debug!("output overlay closed");
+                let output = OutputId(state.world.get::<&GlobalName>(target).unwrap().0);
+                state.feed(RawEvent::OverlayClosed { output });
                 state.remove_overlay(target);
             }
             _ => {}
@@ -266,7 +264,7 @@ impl Event for zwlr_layer_surface_v1::Event {
     }
 }
 
-impl<S: X11Selection> InnerServerState<S> {
+impl<S: X11Selection + 'static> InnerServerState<S> {
     /// Makes a notification window a popup of `output`'s overlay, placed where its client
     /// put it in X.
     pub(super) fn create_overlay_popup(
@@ -441,7 +439,7 @@ pub(super) fn follows_relative_motion(world: &World, pointer: Entity) -> bool {
     world.satisfies::<&OverlayPointer>(pointer).unwrap_or(false)
 }
 
-impl<S: X11Selection> InnerServerState<S> {
+impl<S: X11Selection + 'static> InnerServerState<S> {
     /// Moves the pointer of `relative` by `dx`, `dy` (logical pixels), if it is in an overlay
     /// popup, and gives X where it now is in the window.
     pub(super) fn overlay_relative_motion(
@@ -575,8 +573,8 @@ impl<S: X11Selection> InnerServerState<S> {
     pub(super) fn panel_keeps_focus(&self) -> bool {
         self.focused_overlay.is_some_and(|entity| {
             self.world
-                .get::<&WindowData>(entity)
-                .is_ok_and(|data| data.attrs.is_focused_panel())
+                .get::<&super::Classified>(entity)
+                .is_ok_and(|c| c.0.role.is_panel())
         })
     }
 
@@ -622,13 +620,9 @@ impl<S: X11Selection> InnerServerState<S> {
     }
 }
 
-/// Whether `entity` is a notification window made a popup of an overlay, which its
-/// client places (not one made a popup of the window it is transient for).
-pub(super) fn is_overlay_popup(window: &WindowData, entity: hecs::EntityRef) -> bool {
-    window.attrs.role == WindowRole::Notification
-        && entity.has::<OverlayParent>()
-        && matches!(
-            entity.get::<&SurfaceRole>().as_deref(),
-            Some(SurfaceRole::Popup(_))
-        )
+/// Whether `entity` is an overlay window: a popup of an output's overlay its client places.
+pub(super) fn is_overlay_window(entity: hecs::EntityRef) -> bool {
+    entity
+        .get::<&super::Classified>()
+        .is_some_and(|c| matches!(c.0.role, Role::OverlayWindow { .. }))
 }

@@ -13,7 +13,12 @@ pub(crate) mod selection;
 #[cfg(test)]
 mod tests;
 
+use self::classify::x_kind;
 use self::event::*;
+use self::model::{
+    Classification, FocusOnMap, InputHint, Millis, Model, MotifHints, NetWmType, OutputId,
+    PressRef, RawEvent, Role, SizeHints, SurfaceRef, WindowFacts, XKind, XRect,
+};
 use crate::xstate::{
     Decorations, MoveResizeDirection, WindowDims, WindowRole, WmHints, WmName, WmNormalHints,
 };
@@ -111,7 +116,7 @@ where
 
 #[derive(Default, Debug)]
 struct WindowAttributes {
-    accepts_input: bool,
+    input: InputHint,
     has_take_focus: bool,
     role: WindowRole,
     override_redirect: bool,
@@ -122,28 +127,13 @@ struct WindowAttributes {
     group: Option<x::Window>,
     decorations: Option<Decorations>,
     transient_for: Option<x::Window>,
-    /// Whether the window has WM_HINTS, which `accepts_input` comes from.
-    has_wm_hints: bool,
-    /// Whether a notification window showed right after a click in a window of its
-    /// client, which opened it (see `InnerServerState::clicked_window`).
-    opened_by_click: bool,
-}
-
-impl WindowAttributes {
-    fn require_wm_focus(&self) -> bool {
-        !self.override_redirect && (self.has_take_focus || self.accepts_input)
-    }
-
-    /// Whether a notification window is a panel to focus as it is shown: one transient for
-    /// another, or opened by a click (Feishu closes its meeting panels a moment after opening
-    /// them unless they get focus). Feishu sets no WM_HINTS on them; without them, window
-    /// managers take a window to accept input.
-    fn is_focused_panel(&self) -> bool {
-        self.role == WindowRole::Notification
-            && (self.transient_for.is_some() || self.opened_by_click)
-            && !self.override_redirect
-            && (self.has_take_focus || self.accepts_input || !self.has_wm_hints)
-    }
+    /// WM_PROTOCOLS holds WM_DELETE_WINDOW.
+    has_delete: bool,
+    /// `_NET_WM_WINDOW_TYPE`, in order.
+    types: Vec<NetWmType>,
+    motif: MotifHints,
+    /// `_NET_WM_STATE` holds `_NET_WM_STATE_ABOVE`.
+    keep_above: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -226,6 +216,23 @@ struct CursorSurface;
 
 #[derive(PartialEq, Eq, Debug)]
 struct SurfaceSerial([u32; 2]);
+
+/// The classification a window's role was made from, for as long as the role exists.
+pub(super) struct Classified(pub(super) Classification);
+
+/// Whether a toplevel of this classification keeps its client's size.
+fn fixed_size(c: &Classification) -> bool {
+    matches!(
+        c.role,
+        Role::Toplevel {
+            fixed_size: true,
+            ..
+        } | Role::FullscreenToplevel {
+            fixed_size: true,
+            ..
+        }
+    )
+}
 
 #[derive(Debug)]
 enum SurfaceRole {
@@ -497,6 +504,9 @@ impl<S: X11Selection> XConnection for NoConnection<S> {
         debug!("could not set window dimensions without XWayland initialized");
         false
     }
+    fn resource_id_mask(&self) -> u32 {
+        0x1f_ffff
+    }
 }
 
 pub struct ServerState<C: XConnection> {
@@ -556,6 +566,13 @@ pub struct InnerServerState<S: X11Selection> {
     updated_outputs: Vec<Entity>,
     new_scale: Option<f64>,
     current_scale: f64,
+    /// The window model: what each window is and where X focus goes.
+    model: Model,
+    /// The clock the model's `now` is read from.
+    clock: Instant,
+    resource_id_mask: u32,
+    /// The X geometry and mode of each output, as last fed to the model.
+    output_geometry: HashMap<OutputId, (XRect, (i32, i32))>,
 }
 
 impl<S: X11Selection> ServerState<NoConnection<S>> {
@@ -681,6 +698,10 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             focused_overlay: None,
             held_focus: None,
             world,
+            model: Model::default(),
+            clock: Instant::now(),
+            resource_id_mask: 0x1f_ffff,
+            output_geometry: HashMap::new(),
         };
         Self {
             inner,
@@ -694,10 +715,9 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
     where
         C: XConnection<X11Selection = S>,
     {
-        ServerState {
-            inner: self.inner,
-            connection,
-        }
+        let mut inner = self.inner;
+        inner.resource_id_mask = connection.resource_id_mask();
+        ServerState { inner, connection }
     }
 }
 
@@ -826,6 +846,9 @@ impl<C: XConnection> ServerState<C> {
             }
         }
 
+        self.sync_outputs();
+        self.feed(RawEvent::BatchEnd);
+
         {
             if let Some(FocusData {
                 window,
@@ -931,6 +954,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             .collect::<Vec<_>>();
         for (entity, name) in query.iter() {
             if *name == global {
+                self.output_geometry.remove(&OutputId(global.0));
+                self.feed(RawEvent::OutputRemoved {
+                    output: OutputId(global.0),
+                });
                 self.updated_outputs.push(*entity);
                 self.remove_overlay(*entity);
                 self.world
@@ -1073,16 +1100,78 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
+    /// Forgets what the window's last map said: each map's facts are read afresh. The size
+    /// hints and the class are set again just after this when the window has them; nothing
+    /// reads them between here and role creation.
+    pub fn begin_map_facts(&mut self, window: x::Window) {
+        let Some(id) = self.windows.get(&window).copied() else {
+            return;
+        };
+        let attrs = &mut self.world.get::<&mut WindowData>(id).unwrap().attrs;
+        attrs.size_hints = None;
+        attrs.class = None;
+        attrs.input = InputHint::Absent;
+        attrs.has_take_focus = false;
+        attrs.has_delete = false;
+        attrs.transient_for = None;
+        attrs.types.clear();
+        attrs.motif = MotifHints::default();
+        attrs.keep_above = false;
+    }
+
+    pub fn set_window_types(&mut self, window: x::Window, types: Vec<NetWmType>) {
+        let Some(id) = self.windows.get(&window).copied() else {
+            return;
+        };
+        self.world.get::<&mut WindowData>(id).unwrap().attrs.types = types;
+    }
+
+    pub fn set_motif_hints(&mut self, window: x::Window, motif: MotifHints) {
+        let Some(id) = self.windows.get(&window).copied() else {
+            return;
+        };
+        self.world.get::<&mut WindowData>(id).unwrap().attrs.motif = motif;
+    }
+
+    pub fn set_keep_above(&mut self, window: x::Window, keep_above: bool) {
+        let Some(id) = self.windows.get(&window).copied() else {
+            return;
+        };
+        self.world
+            .get::<&mut WindowData>(id)
+            .unwrap()
+            .attrs
+            .keep_above = keep_above;
+    }
+
+    pub fn set_protocols(&mut self, window: x::Window, take_focus: bool, delete: bool) {
+        let Some(id) = self.windows.get(&window).copied() else {
+            return;
+        };
+        let attrs = &mut self.world.get::<&mut WindowData>(id).unwrap().attrs;
+        attrs.has_take_focus = take_focus;
+        attrs.has_delete = delete;
+    }
+
     pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
         let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting hints for unknown window {window:?}");
             return;
         };
-
-        let attrs = &mut self.world.get::<&mut WindowData>(id).unwrap().attrs;
-        attrs.group = hints.window_group;
-        attrs.accepts_input = hints.accepts_input;
-        attrs.has_wm_hints = true;
+        let input = if hints.accepts_input {
+            InputHint::True
+        } else {
+            InputHint::False
+        };
+        let mapped = {
+            let mut data = self.world.get::<&mut WindowData>(id).unwrap();
+            data.attrs.group = hints.window_group;
+            data.attrs.input = input;
+            data.mapped
+        };
+        if mapped {
+            self.feed(RawEvent::HintsChanged { window, input });
+        }
     }
 
     pub fn set_take_focus(&mut self, window: x::Window, has_take_focus: bool) {
@@ -1110,10 +1199,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         if win.attrs.size_hints.is_none_or(|h| h != hints) {
             debug!("setting {window:?} hints {hints:?}");
+            let is_fixed_size = data.get::<&Classified>().is_some_and(|c| fixed_size(&c.0));
             let mut query = data.query::<(&SurfaceRole, &SurfaceScaleFactor)>();
             // A fixed-size window keeps its size whatever it hints.
             if let Some((SurfaceRole::Toplevel(Some(data)), scale_factor)) = query.get()
-                && !win.attrs.role.is_fixed_size()
+                && !is_fixed_size
             {
                 event::update_size_hints(data, &hints, scale_factor.0);
             }
@@ -1147,6 +1237,89 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
+    /// `window`'s facts as classify reads them, from what xstate recorded at its map.
+    fn window_facts(&self, window: x::Window) -> Option<WindowFacts> {
+        let id = self.windows.get(&window).copied()?;
+        let data = self.world.get::<&WindowData>(id).ok()?;
+        let a = &data.attrs;
+        Some(WindowFacts {
+            window,
+            override_redirect: a.override_redirect,
+            types: a.types.clone(),
+            motif: a.motif,
+            class: a.class.clone(),
+            size_hints: a.size_hints.map(|h| SizeHints {
+                min: h.min_size.map(|s| (s.width, s.height)),
+                max: h.max_size.map(|s| (s.width, s.height)),
+                position: h.position,
+            }),
+            input: a.input,
+            keep_above: a.keep_above,
+            transient_for: a.transient_for,
+            take_focus: a.has_take_focus,
+            delete: a.has_delete,
+            dims: a.dims,
+            client: xcb::Xid::resource_id(&window) & !self.resource_id_mask,
+            guessed: a.role,
+        })
+    }
+
+    fn now_ms(&self) -> Millis {
+        self.clock.elapsed().as_millis() as Millis
+    }
+
+    /// Feeds `raw` to the window model. Its outputs are carried out from T5b on; until
+    /// then the old focus code still decides, and they are only logged.
+    pub(super) fn feed(&mut self, raw: RawEvent) {
+        let now = self.now_ms();
+        let outputs = self.model.feed(&raw, now);
+        if !outputs.is_empty() {
+            debug!(target: "window_model", "{raw:?} -> {outputs:?}");
+        }
+    }
+
+    /// The output entity of the wl_output global `output`.
+    pub(super) fn output_entity(&self, output: OutputId) -> Option<Entity> {
+        self.world
+            .query::<(&WlOutput, &GlobalName)>()
+            .iter()
+            .find(|(_, (_, name))| name.0 == output.0)
+            .map(|(entity, _)| entity)
+    }
+
+    /// Feeds the model each output whose X rect or mode changed since it last saw it.
+    pub(super) fn sync_outputs(&mut self) {
+        let current: Vec<(OutputId, XRect, (i32, i32))> = self
+            .world
+            .query::<(&WlOutput, &GlobalName, &OutputDimensions)>()
+            .iter()
+            .map(|(_, (_, name, dims))| {
+                let (x, y) = self.output_x_origin(dims);
+                let (width, height) = dims.x_size();
+                (
+                    OutputId(name.0),
+                    XRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                    (dims.width, dims.height),
+                )
+            })
+            .collect();
+        for (output, x_rect, mode) in current {
+            if self.output_geometry.get(&output) != Some(&(x_rect, mode)) {
+                self.output_geometry.insert(output, (x_rect, mode));
+                self.feed(RawEvent::OutputGeometry {
+                    output,
+                    x_rect,
+                    mode,
+                });
+            }
+        }
+    }
+
     pub fn set_window_serial(&mut self, window: x::Window, serial: [u32; 2]) {
         let Some(id) = self.windows.get(&window).copied() else {
             warn!("Tried to set serial for unknown window {window:?}");
@@ -1154,6 +1327,16 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
 
         self.world.insert(id, (SurfaceSerial(serial),)).unwrap();
+    }
+
+    /// Whether the client places `window` itself after it is mapped: popups (upstream) and
+    /// overlay windows (their X position is authoritative).
+    fn placed_by_client(&self, window: x::Window, data: hecs::EntityRef) -> bool {
+        let kind = data
+            .get::<&Classified>()
+            .map(|c| c.0.kind)
+            .or_else(|| self.model.roles.entry(window).map(|e| x_kind(&e.facts)));
+        kind.is_some_and(XKind::is_popup) || overlay::is_overlay_window(data)
     }
 
     pub fn can_change_position(&self, window: x::Window) -> bool {
@@ -1167,7 +1350,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         let win = data.get::<&WindowData>().unwrap();
 
-        !win.mapped || win.attrs.role.is_popup() || overlay::is_overlay_popup(&win, data)
+        !win.mapped || self.placed_by_client(window, data)
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -1190,7 +1373,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         if dims == win.attrs.dims {
             return;
-        } else if win.attrs.role.is_popup() || overlay::is_overlay_popup(&win, data) {
+        } else if self.placed_by_client(event.window(), data) {
             win.attrs.dims = dims;
         }
 
@@ -1205,7 +1388,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         }
 
-        if overlay::is_overlay_popup(&win, data) {
+        if overlay::is_overlay_window(data) {
             let entity = data.entity();
             if let Some(output) = self.overlay_output_moved_to(entity, dims) {
                 drop(win);
@@ -1245,18 +1428,24 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     pub fn map_window(&mut self, window: x::Window) {
         debug!("mapping {window:?}");
 
-        let Some(mut win) = self
-            .windows
-            .get(&window)
-            .copied()
-            .and_then(|id| self.world.entity(id).ok())
-            .map(|data| data.get::<&mut WindowData>().unwrap())
-        else {
-            debug!("not mapping unknown window {window:?}");
-            return;
-        };
+        {
+            let Some(mut win) = self
+                .windows
+                .get(&window)
+                .copied()
+                .and_then(|id| self.world.entity(id).ok())
+                .map(|data| data.get::<&mut WindowData>().unwrap())
+            else {
+                debug!("not mapping unknown window {window:?}");
+                return;
+            };
 
-        win.mapped = true;
+            win.mapped = true;
+        }
+
+        if let Some(f) = self.window_facts(window) {
+            self.feed(RawEvent::MapFacts(f));
+        }
     }
 
     pub fn unmap_window(&mut self, window: x::Window) {
@@ -1286,6 +1475,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
             role.destroy();
         }
+        let _ = self.world.remove_one::<Classified>(entity.unwrap());
+
+        self.feed(RawEvent::Unmap { window });
     }
 
     /// Returns the window to restore focus to when the active window is unmapped.
@@ -1341,6 +1533,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
 
         win.attrs.transient_for = Some(parent);
+    }
+
+    pub fn active_window_request(&mut self, window: x::Window) {
+        self.feed(RawEvent::ActiveWindowRequest { window });
+        self.activate_window(window);
     }
 
     pub fn activate_window(&mut self, window: x::Window) {
@@ -1447,6 +1644,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     pub fn destroy_window(&mut self, window: x::Window) {
+        self.feed(RawEvent::Destroy { window });
         if let Some(id) = self.windows.remove(&window) {
             self.world.remove::<(x::Window, WindowData)>(id).unwrap();
             if self.world.entity(id).unwrap().is_empty() {
@@ -1464,6 +1662,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
+        let mut done = Vec::new();
         self.world.pending_activations.retain(|(window, token)| {
             if let Some(surface) = self.windows.get(window).copied().and_then(|id| {
                 self.world
@@ -1472,10 +1671,14 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                     .ok()
             }) {
                 activation_state.activate::<Self>(&surface, token.clone());
+                done.push(*window);
                 return false;
             }
             true
         });
+        for window in done {
+            self.feed(RawEvent::ActivationTokenDone { window });
+        }
     }
 
     fn calc_global_output_offset(&mut self) {
@@ -1497,118 +1700,86 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    /// Creates the appropriate xdg role (toplevel or popup) for the given window.
-    /// Returns `true` if the created window is a toplevel.
-    /// The window of the same X client as `window` that the pointer was pressed in just
-    /// before it showed, if any: a notification window that shows then, with no
-    /// WM_TRANSIENT_FOR, is a panel that click opened (Feishu's participant panel, from
-    /// its participant view).
-    fn clicked_window(&self, window: x::Window) -> Option<x::Window> {
-        // Clients get resource IDs from disjoint ranges; Xwayland, like Xorg, gives each
-        // the top bits.
-        const RESOURCE_ID_MASK: u32 = 0x1f_ffff;
-        let (entity, at) = self.last_press?;
-        if at.elapsed() > Duration::from_millis(1500) {
-            return None;
-        }
-        let clicked = *self.world.get::<&x::Window>(entity).ok()?;
-        let client = |w: x::Window| xcb::Xid::resource_id(&w) & !RESOURCE_ID_MASK;
-        (clicked != window && client(clicked) == client(window)).then_some(clicked)
-    }
-
-    /// Whether `window` has an xdg_toplevel.
-    fn is_toplevel(&self, window: x::Window) -> bool {
-        self.windows.get(&window).is_some_and(|&entity| {
-            matches!(
-                self.world.get::<&SurfaceRole>(entity).as_deref(),
-                Ok(SurfaceRole::Toplevel(Some(_)))
-            )
-        })
-    }
-
+    /// Makes the xdg role `window`'s classification asks for. Returns whether it is a toplevel.
     fn create_role_window(&mut self, window: x::Window, entity: Entity) -> bool {
-        let xdg_surface;
-        let mut popup_for = None;
-        let mut overlay_on = None;
-        let mut opened_by_click = false;
-        let mut fullscreen = false;
-        let splash;
-
-        {
-            let data = self.world.entity(entity).unwrap();
-            let surface = data.get::<&client::wl_surface::WlSurface>().unwrap();
+        let Some(classification) = self.model.roles.classification(window) else {
+            warn!("{window:?} has no classification, not making its role");
+            return false;
+        };
+        let xdg_surface = {
+            let surface = self
+                .world
+                .get::<&client::wl_surface::WlSurface>(entity)
+                .unwrap();
             surface.attach(None, 0, 0);
             surface.commit();
-
-            xdg_surface = self.xdg_wm_base.get_xdg_surface(&surface, &self.qh, entity);
-
-            let window_data = data.get::<&WindowData>().unwrap();
-            if window_data.attrs.role.is_popup() {
-                popup_for = self.last_hovered.or(self.last_focused_toplevel);
-                // Over a notification window with focus (an input method's candidates for
-                // it, say), on its overlay: as a popup of a window below it, it would be
-                // hidden.
-                if self.focused_overlay.is_some_and(|e| self.world.contains(e)) {
-                    overlay_on = self.overlay_output_for(window_data.attrs.dims);
+            self.xdg_wm_base.get_xdg_surface(&surface, &self.qh, entity)
+        };
+        // The classification of the role actually made (differs only in the fallback below).
+        let mut made = classification;
+        let overlay_of = |output: OutputId| {
+            self.output_entity(output).filter(|&e| {
+                self.world
+                    .get::<&overlay::Overlay>(e)
+                    .is_ok_and(|o| o.mapped)
+            })
+        };
+        let placement = match classification.role {
+            Role::OverlayWindow { output, .. } => overlay_of(output).map(Ok),
+            Role::OverlayPopupOf { panel } => {
+                match self.model.roles.classification(panel).map(|c| c.role) {
+                    Some(Role::OverlayWindow { output, .. }) => overlay_of(output).map(Ok),
+                    _ => Some(Err(panel)),
                 }
             }
-            if window_data.attrs.role == WindowRole::Notification {
-                // Transient for an ordinary window (Feishu's meeting panels, while its
-                // meeting window is up): a popup of it, placed from it, as X has
-                // toplevels at their output's corner rather than where the compositor
-                // shows them. The rest (the meeting bars, and what is transient for
-                // them) go on the overlay, placed by their X position.
-                // Without WM_TRANSIENT_FOR, a click in a window of its client just before
-                // it showed opened it: a popup of that window too, if it is ordinary.
-                let clicked = window_data
-                    .attrs
-                    .transient_for
-                    .is_none()
-                    .then(|| self.clicked_window(window))
-                    .flatten();
-                opened_by_click = clicked.is_some();
-                match window_data
-                    .attrs
-                    .transient_for
-                    .or(clicked)
-                    .filter(|&parent| self.is_toplevel(parent))
-                {
-                    Some(parent) => {
-                        popup_for = Some(parent);
-                        overlay_on = None;
+            Role::Popup { parent } | Role::PanelOf { parent } => Some(Err(parent)),
+            Role::Toplevel { .. } | Role::FullscreenToplevel { .. } => None,
+        };
+        let (role, is_toplevel) = match placement {
+            Some(Ok(output)) => (
+                SurfaceRole::Popup(Some(self.create_overlay_popup(entity, xdg_surface, output))),
+                false,
+            ),
+            Some(Err(parent)) => (
+                SurfaceRole::Popup(Some(self.create_popup(entity, xdg_surface, parent))),
+                false,
+            ),
+            None => {
+                let (fullscreen, fixed, parent) = match classification.role {
+                    Role::FullscreenToplevel { parent, fixed_size } => (true, fixed_size, parent),
+                    Role::Toplevel { parent, fixed_size } => (false, fixed_size, parent),
+                    // An overlay that went away between classify and now: a plain toplevel,
+                    // and its `Classified` says so (else it would pass for an overlay window).
+                    _ => {
+                        let fixed_size = classification.kind.is_fixed_size();
+                        warn!("{window:?}: its overlay is gone, making it a toplevel");
+                        made = Classification {
+                            role: Role::Toplevel {
+                                parent: None,
+                                fixed_size,
+                            },
+                            ..classification
+                        };
+                        (false, fixed_size, None)
                     }
-                    None => overlay_on = self.overlay_output_for(window_data.attrs.dims),
-                }
+                };
+                (
+                    SurfaceRole::Toplevel(Some(self.create_toplevel(
+                        entity,
+                        xdg_surface,
+                        fullscreen,
+                        fixed,
+                        parent,
+                    ))),
+                    true,
+                )
             }
-            splash = window_data.attrs.role.is_fixed_size();
-
-            let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
-            for (_, dimensions) in self.world.query::<&OutputDimensions>().iter() {
-                if dimensions.width == width as i32 && dimensions.height == height as i32 {
-                    fullscreen = true;
-                    popup_for = None;
-                    overlay_on = None;
-                    break;
-                }
-            }
-        }
-
-        let (role, is_toplevel) = if let Some(output) = overlay_on {
-            let data = self.create_overlay_popup(entity, xdg_surface, output);
-            (SurfaceRole::Popup(Some(data)), false)
-        } else if let Some(parent) = popup_for {
-            let data = self.create_popup(entity, xdg_surface, parent);
-            (SurfaceRole::Popup(Some(data)), false)
-        } else {
-            let data = self.create_toplevel(entity, xdg_surface, fullscreen, splash);
-            (SurfaceRole::Toplevel(Some(data)), true)
         };
 
         let (surface_role, client) = self
             .world
             .query_one_mut::<(Option<&SurfaceRole>, &client::wl_surface::WlSurface)>(entity)
             .unwrap();
-
         let new_role_type = std::mem::discriminant(&role);
         if let Some(role) = surface_role {
             let old_role_type = std::mem::discriminant(role);
@@ -1617,17 +1788,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 "Surface for {window:?} already had a role: {role:?}"
             );
         }
-
         client.commit();
-        self.world.insert(entity, (role,)).unwrap();
-        if opened_by_click {
-            self.world
-                .get::<&mut WindowData>(entity)
-                .unwrap()
-                .attrs
-                .opened_by_click = true;
-        }
-
+        self.world.insert(entity, (role, Classified(made))).unwrap();
         is_toplevel
     }
 
@@ -1637,6 +1799,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         xdg: XdgSurface,
         fullscreen: bool,
         splash: bool,
+        parent: Option<x::Window>,
     ) -> ToplevelData {
         let window = self.world.get::<&WindowData>(entity).unwrap();
         debug!(
@@ -1738,7 +1901,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             activation_state.activate::<Self>(&surface, token);
         }
 
-        if let Some(parent) = window.attrs.transient_for {
+        if let Some(parent) = parent {
             // TODO: handle transient_for window not being mapped/not a toplevel
             'b: {
                 let Some(parent_id) = self.windows.get(&parent).copied() else {

@@ -195,6 +195,7 @@ impl SurfaceEvents {
         let data = state.world.entity(target).unwrap();
         let surface = data.get::<&WlSurface>().unwrap();
         let mut cmd = CommandBuffer::new();
+        let mut surface_enter = None;
         match event {
             Event::Enter { output } => {
                 let output_entity = output.data().copied().unwrap();
@@ -212,6 +213,9 @@ impl SurfaceEvents {
 
                 let mut query = data.query::<(&x::Window, &mut WindowData)>();
                 if let Some((window, win_data)) = query.get() {
+                    surface_enter = output_data
+                        .get::<&GlobalName>()
+                        .map(|name| (*window, OutputId(name.0)));
                     let Some(dimensions) = output_data.get::<&OutputDimensions>() else {
                         return;
                     };
@@ -266,6 +270,9 @@ impl SurfaceEvents {
 
         drop(surface);
         cmd.run_on(&mut state.world);
+        if let Some((window, output)) = surface_enter {
+            state.feed(RawEvent::SurfaceEnterOutput { window, output });
+        }
     }
 
     fn xdg_event<C: XConnection>(
@@ -462,53 +469,55 @@ impl SurfaceEvents {
                     width,
                     height,
                 });
+                drop(role);
 
                 if first_configure {
-                    let window_data = data.get::<&WindowData>().unwrap();
-                    // Notifications do not take focus from what the user is in, but panels
-                    // do (see WindowAttributes::is_focused_panel).
-                    let attrs = &window_data.attrs;
-                    let focus = if attrs.role == WindowRole::Notification {
-                        attrs.is_focused_panel()
-                    } else {
-                        attrs.require_wm_focus()
-                    };
-                    if focus && attrs.role == WindowRole::Notification {
+                    let window = *data.get::<&x::Window>().unwrap();
+                    let has_take_focus = data.get::<&WindowData>().unwrap().attrs.has_take_focus;
+                    let focus_on_map = data.get::<&Classified>().map(|c| c.0.focus_on_map);
+                    if focus_on_map == Some(FocusOnMap::Panel) {
                         state.inner.focused_overlay = Some(target);
                     }
-                    if focus {
-                        let window = *data.get::<&x::Window>().unwrap();
+                    if matches!(
+                        focus_on_map,
+                        Some(FocusOnMap::Panel | FocusOnMap::SetInput | FocusOnMap::TakeFocus)
+                    ) {
                         state.inner.to_focus = Some(FocusData {
                             window,
                             output_name: None,
                             is_popup: true,
-                            has_take_focus: window_data.attrs.has_take_focus,
+                            has_take_focus,
                         });
                     }
+                    state.inner.feed(RawEvent::PopupFirstConfigure { window });
                 }
             }
             xdg_popup::Event::Repositioned { .. } => {}
             xdg_popup::Event::PopupDone => {
-                state
-                    .connection
-                    .unmap_window(*data.get::<&x::Window>().unwrap());
+                let window = *data.get::<&x::Window>().unwrap();
+                state.inner.feed(RawEvent::PopupDone { window });
+                state.connection.unmap_window(window);
             }
             other => todo!("{other:?}"),
         }
     }
 }
 
+type SurfaceViewportQuery<'a> = (
+    &'a WindowData,
+    &'a WpViewport,
+    &'a SurfaceScaleFactor,
+    Option<&'a mut SurfaceRole>,
+    &'a WlSurface,
+    Option<&'a Classified>,
+);
+
 pub(super) fn update_surface_viewport(
     world: &World,
-    mut surface_query: hecs::QueryOne<(
-        &WindowData,
-        &WpViewport,
-        &SurfaceScaleFactor,
-        Option<&mut SurfaceRole>,
-        &WlSurface,
-    )>,
+    mut surface_query: hecs::QueryOne<SurfaceViewportQuery>,
 ) {
-    let (window_data, viewport, scale_factor, mut role, surface) = surface_query.get().unwrap();
+    let (window_data, viewport, scale_factor, mut role, surface, classified) =
+        surface_query.get().unwrap();
     let dims = &window_data.attrs.dims;
     let size_hints = &window_data.attrs.size_hints;
 
@@ -531,7 +540,7 @@ pub(super) fn update_surface_viewport(
     debug!("{} viewport: {width}x{height}", surface.id());
 
     if let Some(data) = toplevel_data {
-        if window_data.attrs.role.is_fixed_size() {
+        if classified.is_some_and(|c| super::fixed_size(&c.0)) {
             update_fixed_size(data, dims, scale_factor.0);
         } else if let Some(hints) = size_hints {
             update_size_hints(data, hints, scale_factor.0);
@@ -539,7 +548,7 @@ pub(super) fn update_surface_viewport(
     }
 }
 
-/// Pins a fixed-size window (see [`WindowRole::is_fixed_size`]) at its current size, which
+/// Pins a fixed-size window (see [`super::fixed_size`]) at its current size, which
 /// follows the client resizing the window itself; its size hints do not apply.
 pub(super) fn update_fixed_size(data: &ToplevelData, dims: &WindowDims, scale: f64) {
     let decorations_height = if data.decoration.satellite.is_some() {
@@ -716,6 +725,8 @@ impl Event for client::wl_pointer::Event {
                         surface_y * scale.0 + offset_y,
                     ),
                 );
+                let window = *window;
+                let mut entered = false;
                 let mut overlay_pointer = Some(overlay_pointer);
                 let mut do_enter = || {
                     debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
@@ -725,15 +736,16 @@ impl Event for client::wl_pointer::Event {
                         surface_x * scale.0 + offset_x,
                         surface_y * scale.0 + offset_y,
                     );
-                    connection.raise_to_top(*window);
+                    connection.raise_to_top(window);
                     if !surface_is_popup {
-                        state.last_hovered = Some(*window);
+                        state.last_hovered = Some(window);
                     }
                     cmd.insert_one(target, CurrentSurface::Xwayland(surface_entity.unwrap()));
                     match overlay_pointer.take().flatten() {
                         Some(position) => cmd.insert_one(target, position),
                         None => cmd.remove_one::<overlay::OverlayPointer>(target),
                     }
+                    entered = true;
                 };
 
                 if !surface_is_popup {
@@ -762,6 +774,9 @@ impl Event for client::wl_pointer::Event {
                 drop(query);
                 drop(server);
                 cmd.run_on(&mut state.world);
+                if entered {
+                    state.feed(RawEvent::PointerEnter { window });
+                }
             }
             Self::Leave { serial, surface } => {
                 let _ = state.world.remove_one::<PendingEnter>(target);
@@ -850,15 +865,23 @@ impl Event for client::wl_pointer::Event {
                 };
 
                 let (server, seat, current_surface) = query.get().unwrap();
+                let is_press =
+                    button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed);
+                let press_ref = match current_surface {
+                    CurrentSurface::Xwayland(entity) => {
+                        PressRef::X(*state.world.get::<&x::Window>(*entity).unwrap())
+                    }
+                    CurrentSurface::Decoration(parent) => {
+                        PressRef::Decoration(*state.world.get::<&x::Window>(*parent).unwrap())
+                    }
+                };
 
                 // from linux/input-event-codes.h
                 mod button_codes {
                     pub const LEFT: u32 = 0x110;
                 }
 
-                if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
-                    && button == button_codes::LEFT
-                {
+                if is_press && button == button_codes::LEFT {
                     match current_surface {
                         CurrentSurface::Xwayland(entity) => {
                             cmd.insert(*entity, (LastClickSerial(seat.clone(), serial),));
@@ -868,6 +891,11 @@ impl Event for client::wl_pointer::Event {
                             let parent = *parent;
                             drop(query);
                             decoration::handle_pointer_click(state, parent, &seat, serial);
+                            state.feed(RawEvent::Press {
+                                target: press_ref,
+                                serial,
+                                touch: false,
+                            });
                             return;
                         }
                     }
@@ -913,6 +941,13 @@ impl Event for client::wl_pointer::Event {
                     state.focused_overlay = None;
                 }
                 cmd.run_on(&mut state.world);
+                if is_press {
+                    state.feed(RawEvent::Press {
+                        target: press_ref,
+                        serial,
+                        touch: false,
+                    });
+                }
             }
             _ => {
                 let (server, current_surface) = state
@@ -969,8 +1004,17 @@ impl Event for client::wl_keyboard::Event {
                 keys,
             } => {
                 if surface.data::<overlay::OverlayMarker>().is_some() {
-                    drop(keyboard);
+                    let surf_ref = SurfaceRef::Overlay(
+                        state
+                            .overlay_output_id(&surface)
+                            .expect("overlay surface has no output"),
+                    );
                     let seat = data.get::<&client::wl_seat::WlSeat>().as_deref().cloned();
+                    drop(keyboard);
+                    state.feed(RawEvent::KeyboardEnter {
+                        target: surf_ref,
+                        serial,
+                    });
                     if state.overlay_keyboard_enter(target, serial, keys) {
                         state.last_kb_serial = seat.map(|seat| (seat, serial));
                     } else if state.panel_keeps_focus() {
@@ -990,8 +1034,15 @@ impl Event for client::wl_keyboard::Event {
                         .ok()
                 });
                 let Some((window, surface, output)) = query.as_mut().and_then(|q| q.get()) else {
+                    drop(query);
+                    drop(keyboard);
+                    state.feed(RawEvent::KeyboardEnter {
+                        target: SurfaceRef::Other,
+                        serial,
+                    });
                     return;
                 };
+                let window_copy = *window;
                 state.last_kb_serial = Some((
                     data.get::<&client::wl_seat::WlSeat>()
                         .as_deref()
@@ -1000,10 +1051,11 @@ impl Event for client::wl_keyboard::Event {
                     serial,
                 ));
                 let output_name = get_output_name(output, &state.world);
-                let window_data = data.get::<&WindowData>();
-                let has_take_focus = window_data.as_ref().is_some_and(|d| d.attrs.has_take_focus);
+                let has_take_focus = data
+                    .get::<&WindowData>()
+                    .is_some_and(|d| d.attrs.has_take_focus);
                 let focus = FocusData {
-                    window: *window,
+                    window: window_copy,
                     output_name,
                     is_popup: false,
                     has_take_focus,
@@ -1018,10 +1070,25 @@ impl Event for client::wl_keyboard::Event {
                     state.to_focus = Some(focus);
                 }
                 keyboard.enter(serial, surface, keys);
+                drop(query);
+                drop(keyboard);
+                state.feed(RawEvent::KeyboardEnter {
+                    target: SurfaceRef::X(window_copy),
+                    serial,
+                });
             }
             client::wl_keyboard::Event::Leave { serial, surface } => {
                 if surface.data::<overlay::OverlayMarker>().is_some() {
+                    let surf_ref = SurfaceRef::Overlay(
+                        state
+                            .overlay_output_id(&surface)
+                            .expect("overlay surface has no output"),
+                    );
                     drop(keyboard);
+                    state.feed(RawEvent::KeyboardLeave {
+                        target: surf_ref,
+                        serial,
+                    });
                     state.overlay_keyboard_leave(target, serial);
                     return;
                 }
@@ -1033,17 +1100,30 @@ impl Event for client::wl_keyboard::Event {
                     .copied()
                     .and_then(|key| state.world.query_one::<(&x::Window, &WlSurface)>(key).ok());
                 let Some((window, surface)) = query.as_mut().and_then(|q| q.get()) else {
+                    drop(query);
+                    drop(keyboard);
+                    state.feed(RawEvent::KeyboardLeave {
+                        target: SurfaceRef::Other,
+                        serial,
+                    });
                     return;
                 };
-                if state.held_focus.as_ref().map(|d| d.window) == Some(*window) {
+                let window_copy = *window;
+                if state.held_focus.as_ref().map(|d| d.window) == Some(window_copy) {
                     state.held_focus = None;
                 }
-                if state.to_focus.as_ref().map(|d| d.window) == Some(*window) {
+                if state.to_focus.as_ref().map(|d| d.window) == Some(window_copy) {
                     state.to_focus.take();
                 } else {
                     state.unfocus = true;
                 }
                 keyboard.leave(serial, surface);
+                drop(query);
+                drop(keyboard);
+                state.feed(RawEvent::KeyboardLeave {
+                    target: SurfaceRef::X(window_copy),
+                    serial,
+                });
             }
             client::wl_keyboard::Event::Key {
                 serial,
@@ -1059,6 +1139,11 @@ impl Event for client::wl_keyboard::Event {
                     serial,
                 ));
                 keyboard.key(serial, time, key, convert_wenum(key_state));
+                drop(keyboard);
+                state.feed(RawEvent::Key {
+                    pressed: key_state == WEnum::Value(client::wl_keyboard::KeyState::Pressed),
+                    serial,
+                });
             }
             _ => simple_event_shunt! {
                 keyboard, self => [
@@ -1096,6 +1181,7 @@ impl Event for client::wl_touch::Event {
                 y,
             } => {
                 let mut cmd = CommandBuffer::new();
+                let mut press_ref = None;
                 {
                     let connection = &mut state.connection;
                     let world = &mut state.inner.world;
@@ -1108,12 +1194,16 @@ impl Event for client::wl_touch::Event {
                     if let Some((s_surface, s_factor, window)) =
                         s_query.as_mut().and_then(|q| q.get())
                     {
+                        press_ref = Some(PressRef::X(*window));
                         cmd.insert_one(target, *s_factor);
                         connection.raise_to_top(*window);
                         let touch = world.get::<&WlTouch>(target).unwrap();
                         touch.down(serial, time, s_surface, id, x * s_factor.0, y * s_factor.0);
                     } else if let Some(&DecorationMarker { parent }) = surface.data() {
                         drop(s_query);
+                        press_ref = Some(PressRef::Decoration(
+                            *world.get::<&x::Window>(parent).unwrap(),
+                        ));
                         let seat = {
                             let seat =
                                 &*state.world.get::<&client::wl_seat::WlSeat>(target).unwrap();
@@ -1124,6 +1214,13 @@ impl Event for client::wl_touch::Event {
                     }
                 }
                 cmd.run_on(&mut state.world);
+                if let Some(target) = press_ref {
+                    state.feed(RawEvent::Press {
+                        target,
+                        serial,
+                        touch: true,
+                    });
+                }
             }
             Self::Motion { time, id, x, y } => {
                 let Ok((touch, scale)) = state

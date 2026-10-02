@@ -24,6 +24,9 @@ pub trait XConnection: Sized + 'static {
     fn close_window(&mut self, window: x::Window);
     fn unmap_window(&mut self, window: x::Window);
     fn raise_to_top(&mut self, window: x::Window);
+    /// The bits of a resource id that vary within one X client; the others tell clients
+    /// apart (the connection setup's resource-id mask).
+    fn resource_id_mask(&self) -> u32;
 }
 
 pub trait X11Selection {

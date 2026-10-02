@@ -7,6 +7,7 @@ mod tests;
 mod xresources;
 
 use crate::XConnection;
+use crate::server::model::{MotifHints, NetWmType};
 use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
@@ -564,7 +565,7 @@ impl XState {
                 }
             }
             x if x == self.atoms.active_win => {
-                server_state.activate_window(e.window());
+                server_state.active_window_request(e.window());
             }
             x if x == self.atoms.moveresize => {
                 let x::ClientMessageData::Data32(data) = e.data() else {
@@ -621,11 +622,30 @@ impl XState {
         }
     }
 
+    fn net_wm_type(&self, atom: x::Atom) -> NetWmType {
+        let t = &self.window_atoms;
+        match atom {
+            a if a == t.normal => NetWmType::Normal,
+            a if a == t.dialog => NetWmType::Dialog,
+            a if a == t.utility => NetWmType::Utility,
+            a if a == t.splash => NetWmType::Splash,
+            a if a == t.menu => NetWmType::Menu,
+            a if a == t.popup_menu => NetWmType::PopupMenu,
+            a if a == t.dropdown_menu => NetWmType::DropdownMenu,
+            a if a == t.tooltip => NetWmType::Tooltip,
+            a if a == t.drag_n_drop => NetWmType::Dnd,
+            a if a == t.combo => NetWmType::Combo,
+            a if a == self.atoms.window_type_notification => NetWmType::Notification,
+            _ => NetWmType::Other,
+        }
+    }
+
     fn handle_window_properties(
         &self,
         server_state: &mut super::RealServerState,
         window: x::Window,
     ) -> XResult<()> {
+        server_state.begin_map_facts(window);
         let mut title = self.get_net_wm_name(window)?;
         if title.is_none() {
             title = self.get_wm_name(window)?;
@@ -645,17 +665,28 @@ impl XState {
         }
 
         if let Some(protocols) = self.get_protocols(window)? {
-            server_state.set_take_focus(window, protocols.contains(&self.atoms.wm_take_focus));
+            server_state.set_protocols(
+                window,
+                protocols.contains(&self.atoms.wm_take_focus),
+                protocols.contains(&self.atoms.wm_delete_window),
+            );
         }
 
         let motif_wm_hints = self.get_motif_wm_hints(window)?;
-        if let Some(decorations) = motif_wm_hints.as_ref().and_then(|m| m.decorations) {
-            server_state.set_win_decorations(window, decorations);
+        if let Some(motif) = motif_wm_hints {
+            server_state.set_motif_hints(
+                window,
+                MotifHints {
+                    functions: motif.functions.map(|f| f.bits()),
+                    decorations: motif.decorations.map(|d| d.bits()),
+                },
+            );
+            if let Some(decorations) = motif.decorations {
+                server_state.set_win_decorations(window, decorations);
+            }
         }
 
-        let wm_hints = self.get_wm_hints(window)?;
-        let accepts_input = wm_hints.as_ref().map(|hints| hints.accepts_input);
-        if let Some(hints) = wm_hints {
+        if let Some(hints) = self.get_wm_hints(window)? {
             server_state.set_win_hints(window, hints);
         }
 
@@ -666,10 +697,18 @@ impl XState {
         let window_types = self
             .get_net_wm_window_types(window)?
             .unwrap_or_else(Vec::new);
-
-        let keep_above = self
-            .get_net_wm_state(window)?
-            .is_some_and(|state| state.contains(&self.atoms.net_wm_state_above));
+        server_state.set_window_types(
+            window,
+            window_types
+                .iter()
+                .map(|&atom| self.net_wm_type(atom))
+                .collect(),
+        );
+        server_state.set_keep_above(
+            window,
+            self.get_net_wm_state(window)?
+                .is_some_and(|state| state.contains(&self.atoms.net_wm_state_above)),
+        );
 
         let heuristics = WindowRoleHeuristics {
             override_redirect,
@@ -678,8 +717,6 @@ impl XState {
             motif_wm_hints,
             wm_class,
             wm_normal_hints: size_hints,
-            accepts_input,
-            keep_above,
         };
         let role = heuristics.guess_window_role(&self.window_atoms);
         if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
@@ -690,7 +727,8 @@ impl XState {
             );
         }
         server_state.set_window_role(window, role);
-        if let Some(parent) = transient_for.and_then(|t| (!role.is_popup()).then_some(t)) {
+        // For every role: classify reads it for popups too (WeChat's bubble, IME windows).
+        if let Some(parent) = transient_for {
             server_state.set_transient_for(window, parent);
         }
 
@@ -943,6 +981,7 @@ xcb::atoms_struct! {
         primary => b"PRIMARY" only_if_exists = false,
         primary_targets => b"_primary_targets" only_if_exists = false,
         moveresize => b"_NET_WM_MOVERESIZE" only_if_exists = false,
+        window_type_notification => b"_NET_WM_WINDOW_TYPE_NOTIFICATION" only_if_exists = false,
     }
 }
 
@@ -959,7 +998,6 @@ xcb::atoms_struct! {
         utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
         tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP" only_if_exists = false,
         combo => b"_NET_WM_WINDOW_TYPE_COMBO" only_if_exists = false,
-        notification => b"_NET_WM_WINDOW_TYPE_NOTIFICATION" only_if_exists = false,
     }
 }
 
@@ -1152,11 +1190,6 @@ pub enum WindowRole {
     /// A special type of toplevel which is constrained to a fixed size
     /// Commonly the window which displays while the main application is starting up
     Splash,
-    /// A window the application sizes and places itself: toasts, a video call's
-    /// floating control bars. Shown where it asks, as a popup of an overlay on its
-    /// output, when the compositor has wlr-layer-shell; otherwise a fixed-size
-    /// toplevel, like [`WindowRole::Splash`].
-    Notification,
 }
 impl WindowRole {
     /// Define a toplevel or popup with no special properties
@@ -1165,10 +1198,6 @@ impl WindowRole {
     }
     pub fn is_popup(&self) -> bool {
         *self == Self::Popup
-    }
-    /// Whether the window keeps the size its client gives it, as a toplevel.
-    pub fn is_fixed_size(&self) -> bool {
-        matches!(self, Self::Splash | Self::Notification)
     }
 }
 
@@ -1185,10 +1214,6 @@ struct WindowRoleHeuristics {
     motif_wm_hints: Option<motif::Hints>,
     wm_class: Option<String>,
     wm_normal_hints: Option<WmNormalHints>,
-    /// The input field of WM_HINTS, if the window has them.
-    accepts_input: Option<bool>,
-    /// Whether _NET_WM_STATE asks to keep the window above others.
-    keep_above: bool,
 }
 impl WindowRoleHeuristics {
     fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
@@ -1231,47 +1256,16 @@ impl WindowRoleHeuristics {
 
         for ty in window_types {
             match ty {
-                x if x == window_atoms.normal => {
-                    // A frameless window asking to stay above the others, at a place
-                    // of its choosing, for no window in particular, is a prompt
-                    // (Feishu's incoming call bar). As a toplevel the compositor would
-                    // place it, centred; like a notification it goes where its client
-                    // puts it. Not one of a fixed size: that is a tile the user keeps
-                    // and moves about (Feishu's participant view while sharing the
-                    // screen), which the compositor floats as a window anyway.
-                    let positioned = self.wm_normal_hints.is_some_and(|hints| hints.position);
-                    if self.keep_above
-                        && positioned
-                        && motif_no_decor
-                        && !forced_size
-                        && !self.has_transient_for
-                    {
-                        return WindowRole::Notification;
-                    }
-                    return WindowRole::Toplevel;
-                }
+                x if x == window_atoms.normal => return WindowRole::Toplevel,
                 x if x == window_atoms.dialog => {
                     return WindowRole::new_basic(
                         self.has_transient_for && motif_no_decor && forced_size,
                     );
                 }
                 x if x == window_atoms.utility => {
-                    // A frameless utility window for another that takes no input is a
-                    // helper popping up over it (WeChat's like/comment bubble in Moments).
-                    // As a toplevel it would take activation from the window it is for,
-                    // which closes it.
-                    let no_input_helper = self.has_transient_for
-                        && motif_no_decor
-                        && self.accepts_input == Some(false);
-                    return WindowRole::new_basic(
-                        (motif_no_decor && forced_size) || no_input_helper,
-                    );
+                    return WindowRole::new_basic(motif_no_decor && forced_size);
                 }
                 x if x == window_atoms.splash => return WindowRole::Splash,
-                // Notifications (toasts, a call's control bars) are laid out by the
-                // application at a size and place of its choosing. Tiled like a normal
-                // window, a strip a few dozen pixels tall fills a whole column.
-                x if x == window_atoms.notification => return WindowRole::Notification,
                 x if [
                     window_atoms.menu,
                     window_atoms.popup_menu,
@@ -1294,8 +1288,7 @@ impl WindowRoleHeuristics {
     fn log(&self, connection: &xcb::Connection) -> String {
         format!(
             "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
-            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}, accepts_input: {:?}, \
-            keep_above: {}",
+            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}",
             self.override_redirect,
             self.has_transient_for,
             self.window_types
@@ -1305,8 +1298,6 @@ impl WindowRoleHeuristics {
             self.motif_wm_hints,
             self.wm_class,
             self.wm_normal_hints,
-            self.accepts_input,
-            self.keep_above,
         )
     }
 }
@@ -1349,15 +1340,18 @@ pub struct RealConnection {
     connection: Rc<xcb::Connection>,
     outputs: HashMap<String, xcb::randr::Output>,
     primary_output: xcb::randr::Output,
+    resource_id_mask: u32,
 }
 
 impl RealConnection {
     fn new(connection: Rc<xcb::Connection>, atoms: Atoms) -> Self {
+        let resource_id_mask = connection.get_setup().resource_id_mask();
         Self {
             atoms,
             connection,
             outputs: Default::default(),
             primary_output: Xid::none(),
+            resource_id_mask,
         }
     }
 
@@ -1579,6 +1573,10 @@ impl XConnection for RealConnection {
                 value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
             }
         ));
+    }
+
+    fn resource_id_mask(&self) -> u32 {
+        self.resource_id_mask
     }
 }
 

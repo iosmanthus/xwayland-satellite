@@ -15,7 +15,6 @@ impl WindowTypes {
             utility: Atom::new(0x109),
             tooltip: Atom::new(0x109),
             combo: Atom::new(0x10a),
-            notification: Atom::new(0x10b),
         }
     }
 }
@@ -134,104 +133,6 @@ mod window_role_heuristics {
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
-    // WeChat's like/comment bubble in Moments: a frameless Qt::Tool window for
-    // the Moments window, which takes no input (WM_HINTS input false). As a
-    // toplevel it took activation from Moments, and WeChat closed it at once.
-    #[test]
-    fn wechat_moments_comment_bubble() {
-        let win_types = WindowTypes::new();
-        let wm_normal_hints = WmNormalHints::new().min_size(362, 72);
-        let win = WindowRoleHeuristics {
-            window_types: vec![win_types.utility, win_types.normal],
-            has_transient_for: true,
-            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
-            wm_normal_hints: Some(wm_normal_hints.into()),
-            wm_class: Some("wechat".into()),
-            accepts_input: Some(false),
-            ..Default::default()
-        };
-        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
-
-        // Taking input, or unrelated to another window, it is a window of its own.
-        for (accepts_input, has_transient_for) in
-            [(Some(true), true), (None, true), (Some(false), false)]
-        {
-            let win = WindowRoleHeuristics {
-                accepts_input,
-                has_transient_for,
-                window_types: vec![win_types.utility, win_types.normal],
-                motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
-                wm_normal_hints: Some(WmNormalHints::new().min_size(362, 72).into()),
-                ..Default::default()
-            };
-            assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
-        }
-    }
-
-    // Feishu's incoming call bar: a frameless normal window that asks to stay
-    // above the others, at a place of its choosing (the top-right corner of a
-    // screen), with a minimum size only. As a toplevel the compositor centred
-    // it; like a notification it goes where Feishu puts it.
-    #[test]
-    fn feishu_incoming_call_bar() {
-        let win_types = WindowTypes::new();
-        let call_bar = |position: bool, keep_above: bool, has_transient_for: bool, framed: bool| {
-            let mut hints = WmNormalHints::new().min_size(736, 172);
-            if position {
-                hints = hints.program_pos(3056, 48);
-            }
-            let decorations: u32 = if framed { 1 } else { 0 };
-            WindowRoleHeuristics {
-                window_types: vec![win_types.normal],
-                motif_wm_hints: Some(motif::Hints::from(
-                    [0x2_u32, 0, decorations, 0, 0].as_slice(),
-                )),
-                wm_normal_hints: Some(hints.into()),
-                wm_class: Some("Meeting".into()),
-                keep_above,
-                has_transient_for,
-                ..Default::default()
-            }
-        };
-        assert_eq!(
-            call_bar(true, true, false, false).guess_window_role(&win_types),
-            WindowRole::Notification
-        );
-        // Feishu's participant view while sharing the screen is the same kind of
-        // window but of a fixed size: a tile to move about, a window.
-        let participants = WindowRoleHeuristics {
-            window_types: vec![win_types.normal],
-            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
-            wm_normal_hints: Some(
-                WmNormalHints::new()
-                    .program_pos(3424, 80)
-                    .min_size(320, 238)
-                    .max_size(320, 238)
-                    .into(),
-            ),
-            keep_above: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            participants.guess_window_role(&win_types),
-            WindowRole::Toplevel
-        );
-
-        // Without any one of those it is an ordinary window.
-        for (position, keep_above, has_transient_for, framed) in [
-            (false, true, false, false),
-            (true, false, false, false),
-            (true, true, true, false),
-            (true, true, false, true),
-        ] {
-            assert_eq!(
-                call_bar(position, keep_above, has_transient_for, framed)
-                    .guess_window_role(&win_types),
-                WindowRole::Toplevel
-            );
-        }
-    }
-
     // https://github.com/Supreeeme/xwayland-satellite/issues/112
     #[test]
     fn reaper_main_app() {
@@ -339,8 +240,6 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility, win_types.normal],
             wm_class: Some("wechat".into()),
             wm_normal_hints: Some(wm_normal_hints.into()),
-            accepts_input: None,
-            keep_above: false,
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -362,8 +261,6 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             wm_class: Some("Godot".into()),
-            accepts_input: None,
-            keep_above: false,
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -386,22 +283,6 @@ mod window_role_heuristics {
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
-    }
-
-    // Feishu's meeting control bars: NOTIFICATION windows, otherwise hinted like
-    // any top-level. They keep their size rather than being tiled.
-    #[test]
-    fn feishu_meeting_bar() {
-        let win_types = WindowTypes::new();
-        let wm_normal_hints = WmNormalHints::new().min_size(562, 56);
-        let win = WindowRoleHeuristics {
-            window_types: vec![win_types.notification],
-            wm_normal_hints: Some(wm_normal_hints.into()),
-            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
-            wm_class: Some("Meeting".into()),
-            ..Default::default()
-        };
-        assert_eq!(win.guess_window_role(&win_types), WindowRole::Notification);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/294

@@ -261,6 +261,10 @@ impl super::XConnection for FakeXConnection {
     fn unmap_window(&mut self, _: x::Window) {
         todo!()
     }
+
+    fn resource_id_mask(&self) -> u32 {
+        0x1f_ffff
+    }
 }
 
 type EarlyTestFixture = TestFixture<NoConnection<FakeX11Selection>>;
@@ -1577,7 +1581,7 @@ fn new_notification(
     };
     f.new_window(window, false, data);
     f.satellite
-        .set_window_role(window, crate::xstate::WindowRole::Notification);
+        .set_window_types(window, vec![crate::server::model::NetWmType::Notification]);
     f.map_window(comp, window, &surface.obj, &buffer);
     f.run();
     f.check_new_surface()
@@ -2008,7 +2012,7 @@ fn notification_panel_takes_focus_and_keys() {
     };
     f.new_window(panel, false, data);
     f.satellite
-        .set_window_role(panel, crate::xstate::WindowRole::Notification);
+        .set_window_types(panel, vec![crate::server::model::NetWmType::Notification]);
     // No WM_HINTS, as Feishu sets none on its panels: input is assumed.
     f.satellite.set_transient_for(panel, bar);
     f.map_window(&comp, panel, &surface.obj, &buffer);
@@ -2082,7 +2086,7 @@ fn new_panel(
     };
     f.new_window(panel, false, data);
     f.satellite
-        .set_window_role(panel, crate::xstate::WindowRole::Notification);
+        .set_window_types(panel, vec![crate::server::model::NetWmType::Notification]);
     f.satellite.set_transient_for(panel, parent);
     f.map_window(comp, panel, &surface.obj, &buffer);
     f.run();
@@ -2417,7 +2421,7 @@ fn input_method_window_over_focused_panel() {
     };
     f.new_window(panel, false, data);
     f.satellite
-        .set_window_role(panel, crate::xstate::WindowRole::Notification);
+        .set_window_types(panel, vec![crate::server::model::NetWmType::Notification]);
     f.satellite.set_transient_for(panel, bar);
     f.map_window(&comp, panel, &surface.obj, &buffer);
     f.run();
