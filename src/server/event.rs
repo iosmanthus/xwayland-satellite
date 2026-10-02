@@ -868,12 +868,20 @@ impl Event for client::wl_pointer::Event {
                 let is_press =
                     button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed);
                 let press_ref = match current_surface {
-                    CurrentSurface::Xwayland(entity) => {
-                        PressRef::X(*state.world.get::<&x::Window>(*entity).unwrap())
-                    }
-                    CurrentSurface::Decoration(parent) => {
-                        PressRef::Decoration(*state.world.get::<&x::Window>(*parent).unwrap())
-                    }
+                    CurrentSurface::Xwayland(entity) => state
+                        .world
+                        .get::<&x::Window>(*entity)
+                        .ok()
+                        .map(|w| PressRef::X(*w)),
+                    CurrentSurface::Decoration(parent) => state
+                        .world
+                        .get::<&x::Window>(*parent)
+                        .ok()
+                        .map(|w| PressRef::Decoration(*w)),
+                };
+                let Some(press_ref) = press_ref else {
+                    warn!("could not click on surface: stale surface");
+                    return;
                 };
 
                 // from linux/input-event-codes.h
@@ -1004,11 +1012,14 @@ impl Event for client::wl_keyboard::Event {
                 keys,
             } => {
                 if surface.data::<overlay::OverlayMarker>().is_some() {
-                    let surf_ref = SurfaceRef::Overlay(
-                        state
-                            .overlay_output_id(&surface)
-                            .expect("overlay surface has no output"),
-                    );
+                    let Some(output) = state.overlay_output_id(&surface) else {
+                        // The overlay's output went away between the compositor giving it
+                        // keyboard focus and this event reaching us (output unplugged, or the
+                        // layer surface closed): nothing to feed or forward to.
+                        drop(keyboard);
+                        return;
+                    };
+                    let surf_ref = SurfaceRef::Overlay(output);
                     let seat = data.get::<&client::wl_seat::WlSeat>().as_deref().cloned();
                     drop(keyboard);
                     state.feed(RawEvent::KeyboardEnter {
@@ -1079,11 +1090,14 @@ impl Event for client::wl_keyboard::Event {
             }
             client::wl_keyboard::Event::Leave { serial, surface } => {
                 if surface.data::<overlay::OverlayMarker>().is_some() {
-                    let surf_ref = SurfaceRef::Overlay(
-                        state
-                            .overlay_output_id(&surface)
-                            .expect("overlay surface has no output"),
-                    );
+                    let Some(output) = state.overlay_output_id(&surface) else {
+                        // The overlay's output went away between the compositor giving it
+                        // keyboard focus and this event reaching us (output unplugged, or the
+                        // layer surface closed): nothing to feed or forward to.
+                        drop(keyboard);
+                        return;
+                    };
+                    let surf_ref = SurfaceRef::Overlay(output);
                     drop(keyboard);
                     state.feed(RawEvent::KeyboardLeave {
                         target: surf_ref,

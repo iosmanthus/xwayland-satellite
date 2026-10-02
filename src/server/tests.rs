@@ -1630,6 +1630,36 @@ fn output_overlay_removed_with_output() {
     assert!(f.testwl.layer_surfaces().is_empty());
 }
 
+// The compositor can send a keyboard enter or leave for an output's overlay that
+// satellite has already torn down: it queues the event before the output disappears
+// (unplugged, or the layer surface closed), and the event only reaches satellite's
+// handler after the output's removal (and the overlay's Overlay component with it) has
+// already been processed in the same batch. `overlay_output_id` then finds nothing;
+// this must not panic (regression: both arms used to `.expect()` it).
+#[test]
+fn keyboard_event_on_overlay_survives_its_output_disappearing() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let _comp = f.compositor();
+
+    // An Enter for the overlay, queued and delivered only after the output (and its
+    // Overlay component) is already gone: `focus_toplevel` and `remove_output` both
+    // flush immediately, so by the time `f.remove_output`'s first `run()` reads the
+    // wire, both are already buffered and `handle_globals` (which removes the Overlay)
+    // runs before the queued keyboard event is handled.
+    let (output1, overlay1) = new_overlay_output(&mut f, 0, 0);
+    f.testwl.focus_toplevel(overlay1);
+    f.remove_output(output1);
+    f.run();
+
+    // The same race, but for the keyboard leaving the overlay instead of entering it.
+    let (output2, overlay2) = new_overlay_output(&mut f, 1920, 0);
+    f.testwl.focus_toplevel(overlay2);
+    f.run();
+    f.testwl.unfocus_toplevel();
+    f.remove_output(output2);
+    f.run();
+}
+
 // A notification window (a video call's control bar) is placed where its
 // client puts it, and follows it as it moves (dragged by a handle it draws).
 #[test]
