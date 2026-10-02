@@ -15,8 +15,8 @@
 22:22:08.383 configure 37748738 geom=20x20+-200+-200 override 0
 22:22:08.387 create 39845889 geom=20x20+20+20 override 0
 22:22:08.423 create 39845891 geom=400x400+0+0 override 0
-22:22:08.423 prop 39845889 _NET_WM_NAME .feishu-wrapped
-22:22:08.424 prop 39845889 WM_NAME .feishu-wrapped
+22:22:08.423 prop 39845889 _NET_WM_NAME ????
+22:22:08.424 prop 39845889 WM_NAME ????
 22:22:08.434 destroy 37748738 ?
 22:22:08.434 destroy 37748738 ?
 22:22:08.577 create 41943041 geom=10x10+-10000+-10000 override 0

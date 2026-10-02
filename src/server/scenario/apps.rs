@@ -77,8 +77,9 @@ fn feishu_meeting_panel_over_the_bar() {
     s.press(on(PANEL)).batch().expect(&[]);
     s.leave(x(MAIN))
         .enter(SurfaceRef::Overlay(O1))
+        .expect(&[route(win(PANEL))])
         .batch()
-        .expect(&[route(win(PANEL))]);
+        .expect(&[]);
     s.key(true).key(false).expect(&[]);
     s.leave(SurfaceRef::Overlay(O1))
         .enter(x(MAIN))
@@ -117,8 +118,9 @@ fn feishu_panel_over_the_meeting_window() {
 /// Typing into the danmaku panel with fcitx5: the candidate window (override-redirect,
 /// another client) goes over the panel and takes no focus; clicking a candidate leaves
 /// focus and keys with the panel.
-/// Sources: tests/scenarios/sources/fcitx-candidates.log (obs/xwin.log:6478-6522);
-/// inventory §5 row 4.
+/// Sources: tests/scenarios/sources/fcitx-candidates.log (obs/xwin.log:6478-6522), cited for
+/// the window's kind (COMBO, override-redirect, class fcitx), not its place — `candidates()`
+/// keeps the server test's geometry; inventory §5 row 4.
 /// Find: grep -an " map .*class='fcitx'" obs/xwin.log | head
 #[test]
 fn danmaku_typing_with_fcitx5_candidates() {
@@ -217,7 +219,7 @@ fn feishu_participant_panel_opened_from_the_view() {
     s.output(O1, 0).focused_toplevel(VIEW);
     s.press(on(VIEW)).batch().expect(&[xf(win(VIEW))]);
     s.advance(400)
-        .map(clicked_panel(PANEL))
+        .map(clicked_panel(PANEL).class(""))
         .expect(&[xf(win(PANEL))])
         .expect_role(win(PANEL), Role::PanelOf { parent: win(VIEW) });
     s.unmap(win(PANEL)).expect(&[xf(win(VIEW))]);
@@ -283,7 +285,7 @@ fn feishu_fullscreen_emoji_panel_and_tooltip() {
                 parent: win(MEETING),
             },
         );
-    s.map(tooltip(TIP, PANEL))
+    s.map(tooltip(TIP, PANEL).types(&[NetWmType::Notification]))
         .expect(&[])
         .expect_role(win(TIP), Role::OverlayPopupOf { panel: win(PANEL) });
     s.leave(x(MEETING))
@@ -299,9 +301,14 @@ fn feishu_fullscreen_emoji_panel_and_tooltip() {
 /// WeChat's Moments like/comment bubble: UTILITY+NORMAL, transient, frameless, input
 /// false: a popup of the hovered window, never focused; a click on it leaves focus where
 /// the compositor has it; it is destroyed (not reused) once dismissed.
-/// Sources: tests/scenarios/sources/wechat-bubble.log (obs/xwin.log:9185-9209, e.g. the
-/// `class='wechat' type=UTILITY,_KDEOVERRIDE,NORMAL … input=False` map, and the unmap+
-/// destroy that follows it); inventory §5 row 14.
+/// Sources: tests/scenarios/sources/wechat-bubble.log (obs/xwin.log:9185-9209) supports only
+/// type/transient/input/geometry (the `class='wechat' type=UTILITY,_KDEOVERRIDE,NORMAL …
+/// input=False` map, and the unmap+destroy that follows it); its WM_NORMAL_HINTS there are
+/// min = max 272x272 (flags 883), with no `_MOTIF_WM_HINTS` line logged before the map — the
+/// `.no_decor()` and `.min(362, 72)` (min-only, not min=max) facts are the inventory's (row
+/// 14 / b348923), not this excerpt's. Controller: check a live bubble's `_MOTIF_WM_HINTS` and
+/// WM_NORMAL_HINTS (or the T2 trace's `map` line, which records both) before relying on the
+/// differential these facts are meant to pin.
 /// Find: grep -an " map .*class='wechat' type=UTILITY.*input=False" obs/xwin.log | head
 #[test]
 fn wechat_moments_bubble() {
