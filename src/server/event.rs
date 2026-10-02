@@ -841,6 +841,9 @@ impl Event for client::wl_pointer::Event {
                 button,
                 state: button_state,
             } => {
+                if !handle_pending_enter(target, state, "click") {
+                    return;
+                }
                 #[cfg(feature = "trace")]
                 if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed) {
                     trace_event!("press", |l| {
@@ -860,9 +863,6 @@ impl Event for client::wl_pointer::Event {
                             .u("serial", serial.into())
                             .b("touch", false)
                     });
-                }
-                if !handle_pending_enter(target, state, "click") {
-                    return;
                 }
                 let mut cmd = CommandBuffer::new();
 

@@ -703,6 +703,16 @@ impl XState {
             server_state.set_transient_for(window, parent);
         }
 
+        #[cfg(feature = "trace")]
+        let Some(geom) = server_state.window_dims(window) else {
+            // Missing geometry must not be replayed as a real window at the origin.
+            static WARN_MISSING_MAP_GEOMETRY: std::sync::Once = std::sync::Once::new();
+            WARN_MISSING_MAP_GEOMETRY.call_once(|| {
+                warn!("not tracing map for {window:?}: window geometry is unavailable");
+            });
+            return Ok(());
+        };
+
         trace_event!("map", |l| {
             let names = |atom: &x::Atom| {
                 let t = &self.window_atoms;
@@ -729,7 +739,6 @@ impl XState {
             };
             let has = |atom| protocols.as_ref().is_some_and(|p| p.contains(&atom));
             let mask = self.connection.get_setup().resource_id_mask();
-            let geom = server_state.window_dims(window).unwrap_or_default();
             l.u("w", window.resource_id().into())
                 .b("or", override_redirect)
                 .strs("types", &types)
