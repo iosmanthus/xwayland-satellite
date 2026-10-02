@@ -905,8 +905,10 @@ impl Event for client::wl_pointer::Event {
                     state.last_press = Some((entity, std::time::Instant::now()));
                 }
                 // A click in the window the compositor focused while a panel kept X focus:
-                // focus goes there now (see `panel_keeps_focus`).
-                if pressed_window && state.held_focus.is_some() {
+                // focus goes there now (see `panel_keeps_focus`). A click in the panel
+                // itself is the user using it: it keeps focus.
+                if pressed_window && state.held_focus.is_some() && pressed != state.focused_overlay
+                {
                     state.to_focus = state.held_focus.take();
                     state.focused_overlay = None;
                 }
@@ -971,6 +973,13 @@ impl Event for client::wl_keyboard::Event {
                     let seat = data.get::<&client::wl_seat::WlSeat>().as_deref().cloned();
                     if state.overlay_keyboard_enter(target, serial, keys) {
                         state.last_kb_serial = seat.map(|seat| (seat, serial));
+                    } else if state.panel_keeps_focus() {
+                        // No press on the overlay: the compositor gave it keyboard focus only
+                        // because the pointer went over one of its windows (niri's focus
+                        // follows the mouse onto on-demand layers), as over a tooltip Feishu
+                        // shows by its fullscreen meeting's emoji panel. The panel keeps X
+                        // focus, as it does from an X window the pointer goes over.
+                        state.unfocus = false;
                     }
                     return;
                 }

@@ -2121,7 +2121,10 @@ fn notification_transient_for_toplevel_is_its_popup() {
 }
 
 /// Clicks the middle of `surface` with the left button.
-fn click(f: &mut TestFixture<FakeXConnection>, surface: &wayland_server::protocol::wl_surface::WlSurface) {
+fn click(
+    f: &mut TestFixture<FakeXConnection>,
+    surface: &wayland_server::protocol::wl_surface::WlSurface,
+) {
     f.testwl.pointer().enter(30, surface, 5.0, 5.0);
     f.testwl.pointer().frame();
     f.testwl.pointer().button(
@@ -2281,6 +2284,62 @@ fn panel_keeps_focus_the_pointer_moves() {
     f.run();
     f.run();
     assert_eq!(f.connection().focused_window, Some(main));
+}
+
+// Feishu shows a tooltip by its fullscreen meeting's emoji panel, right under the
+// pointer: an override-redirect window transient for the panel, so on the overlay.
+// niri's focus follows the mouse onto the overlay (an on-demand layer) with no click
+// on it; the panel keeps X focus, or Feishu closes it at once.
+#[test]
+fn panel_keeps_focus_the_pointer_takes_to_overlay() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let _keyboard =
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    let (_, overlay) = new_overlay_output(&mut f, 0, 0);
+    let (_, _, _, panel) = panel_over_meeting(&mut f, &comp);
+
+    f.testwl.focus_toplevel(overlay);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+}
+
+// A click in the panel while it keeps focus from the window the pointer went over
+// leaves focus with the panel: picking an emoji must not close it.
+#[test]
+fn click_in_panel_keeps_its_focus() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let _pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let _keyboard =
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    new_overlay_output(&mut f, 0, 0);
+    let meeting = Window::new(1);
+    let (_, meeting_id) = f.create_toplevel(&comp, meeting);
+    let panel = Window::new(2);
+    let (_, panel_id) = new_panel(&mut f, &comp, panel, meeting);
+    assert_eq!(f.connection().focused_window, Some(panel));
+
+    f.testwl.focus_toplevel(meeting_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+
+    let panel_surface = f.testwl.get_surface_data(panel_id).unwrap().surface.clone();
+    f.testwl.pointer().enter(30, &panel_surface, 5.0, 5.0);
+    f.testwl.pointer().frame();
+    f.testwl.pointer().button(
+        31,
+        0,
+        0x110,
+        wayland_server::protocol::wl_pointer::ButtonState::Pressed,
+    );
+    f.testwl.pointer().frame();
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
 }
 
 // When the panel goes away, focus goes to the window the compositor has focused.
