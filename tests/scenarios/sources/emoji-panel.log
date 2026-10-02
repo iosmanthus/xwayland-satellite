@@ -1,0 +1,60 @@
+# xwin.log lines 7150-7199, titles removed
+20:20:02.541 enter 33554436 class='Meeting' mode 1 detail 2
+20:20:02.631 leave 33554436 class='Meeting' mode 2 detail 2
+20:20:02.631 create 33554512 geom=1x1+0+0 override 0
+20:20:02.632 prop 33554512 _MOTIF_WM_HINTS [2, 0, 0, 0, 0]
+20:20:02.636 prop 33554512 _NET_WM_NAME ????
+20:20:02.636 prop 33554512 WM_NAME ????
+20:20:02.639 prop 33554512 WM_NORMAL_HINTS [532, 4294967276, 970, 0, 0, 896, 916, 0, 0, 0, 0, 0]
+20:20:02.641 prop 33554512 WM_TRANSIENT_FOR [33554436]
+20:20:02.644 prop 33554512 WM_NORMAL_HINTS [532, 4294967276, 970, 0, 0, 896, 916, 0, 0, 0, 0, 0]
+20:20:02.644 prop 33554512 _NET_WM_STATE ['_NET_WM_STATE_SKIP_TASKBAR']
+20:20:02.644 configure 33554512 geom=896x1046+1472+556 override 0
+20:20:02.644 configure 33554512 geom=896x1046+1472+556 override 0
+20:20:02.644 configure 33554512 geom=896x1046+-20+970 override 0
+20:20:02.644 configure 33554512 geom=896x1046+-20+970 override 0
+20:20:02.644 configure 33554512 geom=896x1046+-20+970 override 0
+20:20:02.644 configure 33554512 geom=896x1046+-20+970 override 0
+20:20:02.645 map 33554512 class='' type=NOTIFICATION transient=33554436 input=None override=0 geom=896x916+16+970
+20:20:02.645 map 33554512 class='' type=NOTIFICATION transient=33554436 input=None override=0 geom=896x916+16+970
+20:20:02.646 prop 33554512 WM_NORMAL_HINTS [532, 4294967276, 970, 0, 0, 896, 916, 0, 0, 0, 0, 0]
+20:20:02.646 configure 33554512 geom=896x916+-20+970 override 0
+20:20:02.646 configure 33554512 geom=896x916+-20+970 override 0
+20:20:02.646 configure 33554512 geom=896x1046+16+970 override 0
+20:20:02.646 configure 33554512 geom=896x1046+16+970 override 0
+20:20:02.646 focus-out 33554436 class='Meeting' mode 0 detail 3
+20:20:02.646 focus-in 33554512 class='' mode 0 detail 3
+20:20:02.646 active-window 33554512
+20:20:02.646 configure 33554512 geom=896x916+16+970 override 0
+20:20:02.646 configure 33554512 geom=896x916+16+970 override 0
+20:20:02.651 input-focus 33554512 class=''
+20:20:02.781 create 33554515 geom=1x1+0+0 override 1
+20:20:02.782 prop 33554515 _MOTIF_WM_HINTS [2, 0, 0, 0, 0]
+20:20:02.784 prop 33554515 _NET_WM_NAME ????
+20:20:02.784 prop 33554515 WM_NAME ????
+20:20:02.784 prop 33554515 WM_NORMAL_HINTS [532, 216, 1912, 0, 0, 150, 104, 0, 0, 0, 0, 0]
+20:20:02.784 configure 33554515 geom=150x104+1844+1028 override 1
+20:20:02.784 configure 33554515 geom=150x104+1844+1028 override 1
+20:20:02.784 prop 33554515 WM_TRANSIENT_FOR [33554512]
+20:20:02.784 configure 33554515 geom=150x104+216+1912 override 1
+20:20:02.785 configure 33554515 geom=150x104+216+1912 override 1
+20:20:02.785 pointer-over 33554515 ? at 295 2012
+20:20:02.786 prop 33554515 WM_NORMAL_HINTS [532, 216, 1912, 0, 0, 150, 104, 0, 0, 0, 0, 0]
+20:20:02.786 prop 33554515 _NET_WM_STATE ['_NET_WM_STATE_SKIP_TASKBAR']
+20:20:02.787 map 33554515 class='' type=NOTIFICATION transient=33554512 input=None override=1 geom=150x104+216+1912
+20:20:02.788 map 33554515 class='' type=NOTIFICATION transient=33554512 input=None override=1 geom=150x104+216+1912
+20:20:02.788 leave 33554436 class='Meeting' mode 0 detail 4
+20:20:02.788 enter 33554515 class='' mode 0 detail 3
+20:20:02.788 prop 33554515 _NET_WM_WINDOW_OPACITY [0]
+20:20:02.832 focus-out 33554512 class='' mode 0 detail 3
+20:20:02.833 active-window 0
+20:20:02.833 unmap 33554512 class=''
+# niri-events.log lines 503-510, titles removed
+22:24:58.545 focus 40 'Bytedance-feishu'
+20:19:33.248 windows 8
+20:20:02.832 focus None None
+20:20:02.891 focus 88 'Meeting'
+20:20:03.537 focus 2 'kitty'
+20:20:12.936 focus 88 'Meeting'
+20:20:35.967 focus 62 'Bytedance-feishu'
+20:20:38.306 focus 88 'Meeting'

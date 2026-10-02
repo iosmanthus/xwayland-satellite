@@ -1,0 +1,46 @@
+# xwin.log lines 6478-6522, titles removed
+22:22:02.242 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=51x66+1036+2028
+22:22:02.806 unmap 4194307 class='fcitx'
+22:22:02.806 unmap 4194307 class='fcitx'
+22:22:03.269 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+1092+1460
+22:22:03.269 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+1092+1460
+22:22:04.098 unmap 4194307 class='fcitx'
+22:22:04.098 unmap 4194307 class='fcitx'
+22:22:04.218 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+1148+1460
+22:22:04.218 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+1148+1460
+22:22:05.148 unmap 4194307 class='fcitx'
+22:22:05.148 unmap 4194307 class='fcitx'
+22:22:08.383 create 37748736 geom=10x10+-100+-100 override 1
+22:22:08.383 create 37748738 geom=10x10+-10000+-10000 override 0
+22:22:08.383 configure 37748738 geom=20x20+-200+-200 override 0
+22:22:08.387 create 39845889 geom=20x20+20+20 override 0
+22:22:08.423 create 39845891 geom=400x400+0+0 override 0
+22:22:08.423 prop 39845889 _NET_WM_NAME .feishu-wrapped
+22:22:08.424 prop 39845889 WM_NAME .feishu-wrapped
+22:22:08.434 destroy 37748738 ?
+22:22:08.434 destroy 37748738 ?
+22:22:08.577 create 41943041 geom=10x10+-10000+-10000 override 0
+22:22:08.577 configure 41943041 geom=20x20+-200+-200 override 0
+22:22:08.579 destroy 41943041 ?
+22:22:08.579 destroy 41943041 ?
+22:22:10.736 enter 10485764 class='Bytedance-feishu' mode 1 detail 2
+22:22:10.843 leave 10485764 class='Bytedance-feishu' mode 2 detail 2
+22:22:11.442 enter 10485764 class='Bytedance-feishu' mode 1 detail 2
+22:22:11.568 leave 10485764 class='Bytedance-feishu' mode 2 detail 2
+22:22:12.574 enter 10485764 class='Bytedance-feishu' mode 1 detail 2
+22:22:12.672 leave 10485764 class='Bytedance-feishu' mode 2 detail 2
+22:22:13.245 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+1036+1460
+22:22:13.246 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+1036+1460
+22:22:14.002 unmap 4194307 class='fcitx'
+22:22:14.002 unmap 4194307 class='fcitx'
+22:22:14.344 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+1120+1460
+22:22:14.345 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+1120+1460
+22:22:15.129 unmap 4194307 class='fcitx'
+22:22:15.129 unmap 4194307 class='fcitx'
+22:22:15.429 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=95x528+1176+1460
+22:22:15.430 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=95x528+1176+1460
+22:22:15.946 unmap 4194307 class='fcitx'
+22:22:15.946 unmap 4194307 class='fcitx'
+22:22:16.046 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=95x528+1232+1460
+22:22:16.047 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=95x528+1232+1460
+22:22:16.247 unmap 4194307 class='fcitx'

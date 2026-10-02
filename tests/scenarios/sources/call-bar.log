@@ -1,0 +1,30 @@
+# xwin.log lines 447-475, titles removed
+19:35:15.959 create 37748740 geom=1x1+0+0 override 0
+19:35:15.995 prop 37748740 _MOTIF_WM_HINTS [2, 0, 0, 0, 0]
+19:35:16.001 prop 37748740 _NET_WM_NAME ????
+19:35:16.001 prop 37748740 WM_NAME ????
+19:35:16.001 configure 37748740 geom=2x2+1918+1078 override 0
+19:35:16.001 configure 37748740 geom=2x2+1918+1078 override 0
+19:35:16.006 prop 37748740 WM_NORMAL_HINTS [532, 3056, 48, 0, 0, 736, 172, 0, 0, 0, 0, 0]
+19:35:16.006 prop 37748740 WM_NORMAL_HINTS [532, 3056, 48, 0, 0, 736, 172, 0, 0, 0, 0, 0]
+19:35:16.006 prop 37748740 _NET_WM_STATE ['_NET_WM_STATE_ABOVE']
+19:35:16.007 configure 37748740 geom=736x172+3056+48 override 0
+19:35:16.007 configure 37748740 geom=736x172+3056+48 override 0
+19:35:16.007 configure 37748740 geom=736x172+3056+48 override 0
+19:35:16.007 configure 37748740 geom=736x172+3056+48 override 0
+19:35:16.007 map 37748740 class='Meeting' type=NORMAL transient=0 input=None override=0 geom=736x172+3056+48
+19:35:16.009 map 37748740 class='Meeting' type=NORMAL transient=0 input=None override=0 geom=736x172+3056+48
+19:35:18.398 leave 27262980 class='Bytedance-feishu' mode 0 detail 1
+19:35:18.399 pointer-over 0 ? at 1434 1
+19:35:18.682 configure 27262980 geom=3840x2112+0+0 override 0
+19:35:18.682 configure 27262980 geom=3840x2112+0+0 override 0
+19:35:18.682 enter 27262980 class='Bytedance-feishu' mode 0 detail 1
+19:35:18.687 pointer-over 27262980 class='Bytedance-feishu' at 2930 0
+19:35:18.704 focus-out 27262980 class='Bytedance-feishu' mode 0 detail 3
+19:35:18.704 active-window 0
+19:35:18.704 leave 27262980 class='Bytedance-feishu' mode 0 detail 1
+19:35:18.708 input-focus 0 ?
+19:35:18.708 pointer-over 0 ? at 3034 48
+19:35:18.748 configure 37748740 geom=736x172+3056+48 override 0
+19:35:18.748 configure 37748740 geom=736x172+3056+48 override 0
+19:35:18.748 enter 27262980 class='Bytedance-feishu' mode 0 detail 1

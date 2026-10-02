@@ -1,0 +1,47 @@
+# xwin.log lines 3741-3786, titles removed
+20:57:48.714 enter 20971541 class='' mode 0 detail 1
+20:57:48.721 pointer-over 20971541 class='' at 224 58
+20:57:48.982 enter 20971541 class='' mode 1 detail 2
+20:57:49.058 leave 20971541 class='' mode 2 detail 2
+20:57:49.058 create 20971565 geom=1x1+0+0 override 0
+20:57:49.059 prop 20971565 _MOTIF_WM_HINTS [2, 0, 0, 0, 0]
+20:57:49.060 prop 20971565 _NET_WM_NAME ????
+20:57:49.060 prop 20971565 WM_NAME ????
+20:57:49.091 prop 20971565 WM_NORMAL_HINTS [16, 0, 0, 0, 0, 672, 1072, 0, 0, 0, 0, 0]
+20:57:49.091 configure 20971565 geom=32x32+1904+1064 override 0
+20:57:49.091 configure 20971565 geom=32x32+1904+1064 override 0
+20:57:49.092 prop 20971565 WM_NORMAL_HINTS [532, 224, 20, 0, 0, 672, 1072, 0, 0, 0, 0, 0]
+20:57:49.092 prop 20971565 WM_NORMAL_HINTS [532, 224, 20, 0, 0, 672, 1072, 0, 0, 0, 0, 0]
+20:57:49.094 prop 20971565 _NET_WM_STATE ['_NET_WM_STATE_ABOVE', '_NET_WM_STATE_SKIP_TASKBAR']
+20:57:49.094 configure 20971565 geom=672x1072+224+20 override 0
+20:57:49.094 configure 20971565 geom=672x1072+224+20 override 0
+20:57:49.094 configure 20971565 geom=672x1072+224+20 override 0
+20:57:49.094 configure 20971565 geom=672x1072+224+20 override 0
+20:57:49.095 map 20971565 class='' type=NOTIFICATION transient=0 input=None override=0 geom=672x1072+224+20
+20:57:49.095 map 20971565 class='' type=NOTIFICATION transient=0 input=None override=0 geom=672x1072+224+20
+20:57:49.273 configure 10485764 geom=3840x2112+0+0 override 0
+20:57:49.273 configure 10485764 geom=3840x2112+0+0 override 0
+20:57:49.273 leave 20971541 class='' mode 0 detail 4
+20:57:49.273 enter 10485764 class='Bytedance-feishu' mode 0 detail 4
+20:57:49.273 focus-out 20971541 class='' mode 0 detail 3
+20:57:49.274 focus-in 10485764 class='Bytedance-feishu' mode 0 detail 3
+20:57:49.275 active-window 10485764
+20:57:49.280 input-focus 10485764 class='Bytedance-feishu'
+20:57:49.280 pointer-over 10485764 class='Bytedance-feishu' at 3462 313
+20:57:49.628 configure 20971541 geom=320x238+0+0 override 0
+20:57:49.628 configure 20971541 geom=320x238+0+0 override 0
+20:57:49.629 focus-out 10485764 class='Bytedance-feishu' mode 0 detail 3
+20:57:49.629 focus-in 20971541 class='' mode 0 detail 3
+20:57:49.629 active-window 20971541
+20:57:49.629 leave 10485764 class='Bytedance-feishu' mode 0 detail 1
+20:57:49.629 enter 10485764 class='Bytedance-feishu' mode 0 detail 1
+20:57:49.629 leave 10485764 class='Bytedance-feishu' mode 0 detail 4
+20:57:49.629 enter 20971541 class='' mode 0 detail 4
+20:57:49.631 input-focus 20971541 class=''
+20:57:49.631 pointer-over 20971541 class='' at 2 213
+20:57:50.040 enter 20971541 class='' mode 1 detail 2
+20:57:50.058 unmap 20971565 class=''
+20:57:50.058 unmap 20971565 class=''
+20:57:50.058 unmap 20971565 class=''
+20:57:50.062 destroy 20971565 class=''
+20:57:50.062 destroy 20971565 ?

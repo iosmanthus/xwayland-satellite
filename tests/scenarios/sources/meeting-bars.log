@@ -1,0 +1,31 @@
+# xwin.log lines 557-586, titles removed
+19:35:41.766 create 37748771 geom=1x1+0+0 override 0
+19:35:41.769 prop 37748771 WM_NORMAL_HINTS [16, 0, 0, 0, 0, 640, 676, 0, 0, 0, 0, 0]
+19:35:41.769 create 37748774 geom=1120x84+1860+2068 override 0
+19:35:41.769 configure 37748771 geom=640x676+1600+742 override 0
+19:35:41.769 configure 37748771 geom=640x676+1600+742 override 0
+19:35:41.769 configure 37748771 geom=640x676+0+1484 override 0
+19:35:41.769 configure 37748771 geom=640x676+0+1484 override 0
+19:35:41.769 input-focus 0 ?
+19:35:41.769 pointer-over 27262980 class='Bytedance-feishu' at 745 685
+19:35:41.772 prop 37748774 _MOTIF_WM_HINTS [2, 0, 0, 0, 0]
+19:35:41.775 focus-in 27262980 class='Bytedance-feishu' mode 0 detail 3
+19:35:41.776 active-window 27262980
+19:35:41.777 prop 37748774 _NET_WM_NAME ????
+19:35:41.777 prop 37748774 WM_NAME ????
+19:35:41.778 prop 37748774 WM_NORMAL_HINTS [516, 1860, 2068, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+19:35:41.778 prop 37748774 _NET_WM_STATE ['_NET_WM_STATE_ABOVE', '_NET_WM_STATE_SKIP_TASKBAR']
+19:35:41.778 configure 37748774 geom=1120x84+1860+2068 override 0
+19:35:41.779 configure 37748774 geom=1120x84+1860+2068 override 0
+19:35:41.779 map 37748774 class='Meeting' type=NOTIFICATION transient=0 input=None override=0 geom=1372x84+1222+2076
+19:35:41.779 input-focus 27262980 class='Bytedance-feishu'
+19:35:41.780 map 37748774 class='Meeting' type=NOTIFICATION transient=0 input=None override=0 geom=1372x84+1222+2076
+19:35:41.780 configure 37748765 geom=642x56+1598+2020 override 0
+19:35:41.780 configure 37748765 geom=642x56+1598+2020 override 0
+19:35:41.780 configure 37748774 geom=1372x84+1234+2076 override 0
+19:35:41.780 configure 37748774 geom=1372x84+1234+2076 override 0
+19:35:41.780 configure 37748774 geom=1372x84+1222+2076 override 0
+19:35:41.780 configure 37748774 geom=1372x84+1222+2076 override 0
+19:35:41.780 configure 37748765 geom=642x56+1586+2020 override 0
+19:35:41.780 configure 37748765 geom=642x56+1586+2020 override 0
+19:35:41.932 configure 27262980 geom=3840x2112+0+0 override 0

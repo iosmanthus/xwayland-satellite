@@ -1,0 +1,25 @@
+# xwin.log lines 626-649, titles removed
+19:35:45.688 focus-in 27262980 class='Bytedance-feishu' mode 0 detail 3
+19:35:45.689 active-window 27262980
+19:35:45.689 enter 27262980 class='Bytedance-feishu' mode 0 detail 1
+19:35:45.694 input-focus 27262980 class='Bytedance-feishu'
+19:35:45.694 pointer-over 27262980 class='Bytedance-feishu' at 2493 595
+19:35:46.457 create 37748777 geom=1x1+0+0 override 0
+19:35:46.460 prop 37748777 _MOTIF_WM_HINTS [2, 0, 0, 0, 0]
+19:35:46.460 prop 37748777 WM_NORMAL_HINTS [516, 1656, 96, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+19:35:46.460 prop 37748777 _NET_WM_STATE ['_NET_WM_STATE_ABOVE', '_NET_WM_STATE_SKIP_TASKBAR']
+19:35:46.460 configure 37748777 geom=528x144+1656+96 override 0
+19:35:46.460 configure 37748777 geom=528x144+1656+96 override 0
+19:35:46.460 configure 37748777 geom=2x2+1918+1078 override 0
+19:35:46.460 configure 37748777 geom=2x2+1918+1078 override 0
+19:35:46.460 configure 37748777 geom=528x144+1656+96 override 0
+19:35:46.461 configure 37748777 geom=528x144+1656+96 override 0
+19:35:46.461 configure 37748777 geom=528x144+1656+96 override 0
+19:35:46.461 configure 37748777 geom=528x144+1656+96 override 0
+19:35:46.462 map 37748777 class='' type=NOTIFICATION transient=0 input=None override=0 geom=528x144+1656+96
+19:35:46.463 map 37748777 class='' type=NOTIFICATION transient=0 input=None override=0 geom=528x144+1656+96
+19:35:49.459 unmap 37748777 class=''
+19:35:49.459 unmap 37748777 class=''
+19:35:49.459 unmap 37748777 class=''
+19:35:49.469 destroy 37748777 class=''
+19:35:49.469 destroy 37748777 ?

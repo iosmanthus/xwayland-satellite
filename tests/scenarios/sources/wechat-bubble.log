@@ -1,0 +1,26 @@
+# xwin.log lines 9185-9209, titles removed
+20:39:26.518 enter 18874384 class='wechat' mode 0 detail 0
+20:39:26.526 pointer-over 18874384 class='wechat' at 1509 36
+20:39:29.957 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=95x528+684+1568
+20:39:29.958 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=95x528+684+1568
+20:39:30.653 unmap 4194307 class='fcitx'
+20:39:30.653 unmap 4194307 class='fcitx'
+20:39:30.663 create 18874521 geom=536x896+632+1540 override 0
+20:39:30.665 prop 18874521 WM_NORMAL_HINTS [883, 632, 1540, 272, 272, 272, 272, 272, 272, 2, 2, 0]
+20:39:30.666 prop 18874521 WM_NORMAL_HINTS [883, 632, 1540, 272, 272, 272, 272, 272, 272, 2, 2, 0]
+20:39:30.666 prop 18874521 WM_TRANSIENT_FOR [18874384]
+20:39:30.666 configure 18874521 geom=272x272+632+1540 override 0
+20:39:30.666 configure 18874521 geom=272x272+632+1540 override 0
+20:39:30.666 configure 18874521 geom=272x272+632+1540 override 0
+20:39:30.666 configure 18874521 geom=272x272+632+1540 override 0
+20:39:30.667 map 18874521 class='wechat' type=UTILITY,_KDEOVERRIDE,NORMAL transient=18874384 input=False override=0 geom=272x272+632+1540
+20:39:30.668 map 18874521 class='wechat' type=UTILITY,_KDEOVERRIDE,NORMAL transient=18874384 input=False override=0 geom=272x272+632+1540
+20:39:31.113 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+712+1570
+20:39:31.114 map 4194307 class='fcitx' type=COMBO transient=0 input=None override=1 geom=104x528+712+1570
+20:39:32.336 unmap 4194307 class='fcitx'
+20:39:32.336 unmap 4194307 class='fcitx'
+20:39:32.337 unmap 18874521 class='wechat'
+20:39:32.337 unmap 18874521 class='wechat'
+20:39:32.337 unmap 18874521 class='wechat'
+20:39:32.338 destroy 18874521 class='wechat'
+20:39:32.338 destroy 18874521 ?
