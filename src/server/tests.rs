@@ -2287,6 +2287,90 @@ fn notification_transient_for_toplevel_is_its_popup() {
     );
 }
 
+/// The offset satellite asks for when it places `dims` relative to `parent`.
+fn popup_offset(parent: WindowDims, dims: WindowDims, scale: f64) -> testwl::Vec2 {
+    testwl::Vec2 {
+        x: ((i32::from(dims.x) - i32::from(parent.x)) as f64 / scale) as i32,
+        y: ((i32::from(dims.y) - i32::from(parent.y)) as f64 / scale) as i32,
+    }
+}
+
+// Feishu's in-meeting chat panel maps small, then grows upwards once its messages
+// load: one ConfigureRequest with X | Y | WIDTH | HEIGHT that keeps its bottom on the
+// toolbar. A `PanelOf` panel is an xdg_popup placed from its X geometry, so its client
+// moves it like any popup; satellite used to pass on only the new size (the panel's X
+// kind is Notification, not Popup), and the compositor slid the taller popup down off
+// the toolbar.
+#[test]
+fn panel_moves_when_its_client_moves_it() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (_main, _main_id, meeting, panel, _panel_surface) = panel_over_meeting(&mut f, &comp);
+    let panel_id = f.testwl.last_created_surface_id().unwrap();
+    assert!(f.satellite.can_change_position(panel));
+
+    let grown = WindowDims {
+        x: 1600,
+        y: 1136,
+        width: 904,
+        height: 880,
+    };
+    f.reconfigure_window(panel, grown, false);
+    f.run();
+    f.run();
+    let parent = f.connection().windows[&meeting].dims;
+    let scale = f.satellite.current_scale;
+    let popup = f.testwl.get_surface_data(panel_id).unwrap().popup();
+    assert_eq!(
+        popup.positioner_state.offset,
+        popup_offset(parent, grown, scale)
+    );
+    assert_eq!(
+        popup.positioner_state.size,
+        Some(testwl::Vec2 {
+            x: (f64::from(grown.width) / scale).ceil() as i32,
+            y: (f64::from(grown.height) / scale).ceil() as i32,
+        })
+    );
+    let entity = f.satellite.windows[&panel];
+    let data = f
+        .satellite
+        .world
+        .get::<&crate::server::WindowData>(entity)
+        .unwrap();
+    assert_eq!(data.attrs.dims, grown);
+}
+
+// A popup nested in another popup (rule 11: Feishu's combo bubble inside its panel) is
+// repositioned relative to its xdg parent, as `create_popup` placed it, not relative to
+// its output.
+#[test]
+fn nested_popup_moves_relative_to_its_parent() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (_meeting, panel, bubble, _panel_surface, _panel_id, bubble_id) =
+        panel_with_a_popup_child(&mut f, &comp);
+
+    let moved = WindowDims {
+        x: 1720,
+        y: 1830,
+        width: 120,
+        height: 40,
+    };
+    f.reconfigure_window(bubble, moved, true);
+    f.run();
+    f.run();
+    let parent = f.connection().windows[&panel].dims;
+    let scale = f.satellite.current_scale;
+    let popup = f.testwl.get_surface_data(bubble_id).unwrap().popup();
+    assert_eq!(
+        popup.positioner_state.offset,
+        popup_offset(parent, moved, scale)
+    );
+}
+
 /// Clicks the middle of `surface` with the left button.
 fn click(
     f: &mut TestFixture<FakeXConnection>,

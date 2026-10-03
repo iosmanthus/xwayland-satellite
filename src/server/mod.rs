@@ -20,8 +20,7 @@ use self::classify::x_kind;
 use self::event::*;
 use self::model::{
     Classification, InputHint, KbTarget, Method, Millis, Model, MotifHints, NetWmType, Output,
-    OutputId, PressRef, RawEvent, Role, SizeHints, SurfaceRef, WindowFacts, XFocusChange, XKind,
-    XRect,
+    OutputId, PressRef, RawEvent, Role, SizeHints, SurfaceRef, WindowFacts, XFocusChange, XRect,
 };
 use crate::xstate::{
     Decorations, MoveResizeDirection, WindowDims, WindowRole, WmHints, WmName, WmNormalHints,
@@ -1404,14 +1403,18 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.world.insert(id, (SurfaceSerial(serial),)).unwrap();
     }
 
-    /// Whether the client places `window` itself after it is mapped: popups (upstream) and
-    /// overlay windows (their X position is authoritative).
+    /// Whether the client places `window` itself after it is mapped: every window shown as
+    /// an xdg_popup (popups, panels) or on an overlay is placed from its X geometry, so
+    /// its X position is authoritative. Before its role is made, its X kind decides.
     fn placed_by_client(&self, window: x::Window, data: hecs::EntityRef) -> bool {
-        let kind = data
-            .get::<&Classified>()
-            .map(|c| c.0.kind)
-            .or_else(|| self.model.roles.entry(window).map(|e| x_kind(&e.facts)));
-        kind.is_some_and(XKind::is_popup) || overlay::is_overlay_window(data)
+        if let Some(classified) = data.get::<&Classified>() {
+            return !classified.0.role.is_toplevel();
+        }
+        self.model
+            .roles
+            .entry(window)
+            .is_some_and(|e| x_kind(&e.facts).is_popup())
+            || overlay::is_overlay_window(data)
     }
 
     pub fn can_change_position(&self, window: x::Window) -> bool {
@@ -1429,6 +1432,19 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
+        // A popup is placed relative to its xdg parent's X position, as `create_popup`
+        // placed it (read before this window's data is borrowed mutably).
+        let xdg_parent_origin = self
+            .windows
+            .get(&event.window())
+            .and_then(|&e| self.world.get::<&PopupXdgParent>(e).ok().map(|p| p.0))
+            .and_then(|parent| self.windows.get(&parent).copied())
+            .and_then(|e| {
+                self.world
+                    .get::<&WindowData>(e)
+                    .ok()
+                    .map(|w| (i32::from(w.attrs.dims.x), i32::from(w.attrs.dims.y)))
+            });
         let Some((mut win, data)) = self
             .windows
             .get(&event.window())
@@ -1479,9 +1495,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         match role {
             SurfaceRole::Popup(Some(popup)) => {
+                let (origin_x, origin_y) =
+                    xdg_parent_origin.unwrap_or((win.output_offset.x, win.output_offset.y));
                 popup.positioner.set_offset(
-                    ((event.x() as i32 - win.output_offset.x) as f64 / scale_factor.0) as i32,
-                    ((event.y() as i32 - win.output_offset.y) as f64 / scale_factor.0) as i32,
+                    ((event.x() as i32 - origin_x) as f64 / scale_factor.0) as i32,
+                    ((event.y() as i32 - origin_y) as f64 / scale_factor.0) as i32,
                 );
                 popup.positioner.set_size(
                     1.max((event.width() as f64 / scale_factor.0).ceil() as i32),
