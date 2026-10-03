@@ -831,6 +831,8 @@ impl<C: XConnection> ServerState<C> {
         if let Some(change) = self.pending_xfocus.take() {
             self.apply_xfocus(change);
         }
+        // Close and flush the trace batch only after its X focus calls are recorded.
+        trace_line!(trace_codec::encode(self.now_ms(), &RawEvent::BatchEnd));
 
         self.handle_selection_events();
         self.handle_activations();
@@ -1251,7 +1253,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let now = self.now_ms();
         // Raw and role lines use the model clock; emit's X calls use the tracer clock.
         // Replay follows line order, not timestamps from those different clock origins.
-        trace_line!(trace_codec::encode(now, &raw));
+        #[cfg(feature = "trace")]
+        if !matches!(raw, RawEvent::BatchEnd) {
+            trace_line!(trace_codec::encode(now, &raw));
+        }
         for output in self.model.feed(&raw, now) {
             match output {
                 Output::XFocus(change) => self.pending_xfocus = Some(change),
