@@ -1391,6 +1391,18 @@ impl XConnection for RealConnection {
         window: x::Window,
         dims: crate::server::PendingSurfaceState,
     ) -> bool {
+        trace_event!("x_call", |l| l
+            .s("call", "set_window_dims")
+            .u("w", window.resource_id().into())
+            .ints(
+                "rect",
+                &[
+                    i64::from(dims.x),
+                    i64::from(dims.y),
+                    i64::from(dims.width),
+                    i64::from(dims.height)
+                ]
+            ));
         trace!("set window dimensions {window:?} {dims:?}");
         unwrap_or_skip_bad_window!(
             self.connection.send_and_check_request(&x::ConfigureWindow {
@@ -1408,6 +1420,10 @@ impl XConnection for RealConnection {
     }
 
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool) {
+        trace_event!("x_call", |l| l
+            .s("call", "set_fullscreen")
+            .u("w", window.resource_id().into())
+            .b("on", fullscreen));
         let data = if fullscreen {
             std::slice::from_ref(&self.atoms.wm_fullscreen)
         } else {
@@ -1429,6 +1445,10 @@ impl XConnection for RealConnection {
     }
 
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>) {
+        trace_event!("x_call", |l| l
+            .s("call", "focus_window")
+            .u("w", window.resource_id().into())
+            .opt_s("output", output_name.as_deref()));
         trace!("{window:?} {output_name:?}");
         if let Err(e) = self.connection.send_and_check_request(&x::SetInputFocus {
             focus: window,
@@ -1493,6 +1513,9 @@ impl XConnection for RealConnection {
     }
 
     fn send_take_focus(&mut self, window: x::Window) {
+        trace_event!("x_call", |l| l
+            .s("call", "send_take_focus")
+            .u("w", window.resource_id().into()));
         let resource_id = self.atoms.wm_take_focus.resource_id();
         let data = [resource_id, x::CURRENT_TIME, 0, 0, 0];
         let event = &x::ClientMessageEvent::new(
@@ -1509,6 +1532,9 @@ impl XConnection for RealConnection {
     }
 
     fn close_window(&mut self, window: x::Window) {
+        trace_event!("x_call", |l| l
+            .s("call", "close_window")
+            .u("w", window.resource_id().into()));
         let cookie = self.connection.send_request(&x::GetProperty {
             window,
             delete: false,
@@ -1544,6 +1570,9 @@ impl XConnection for RealConnection {
     }
 
     fn unmap_window(&mut self, window: x::Window) {
+        trace_event!("x_call", |l| l
+            .s("call", "unmap_window")
+            .u("w", window.resource_id().into()));
         unwrap_or_skip_bad_window_ret!(
             self.connection
                 .send_and_check_request(&x::UnmapWindow { window })
@@ -1551,6 +1580,9 @@ impl XConnection for RealConnection {
     }
 
     fn raise_to_top(&mut self, window: x::Window) {
+        trace_event!("x_call", |l| l
+            .s("call", "raise_to_top")
+            .u("w", window.resource_id().into()));
         unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
             &x::ConfigureWindow {
                 window,

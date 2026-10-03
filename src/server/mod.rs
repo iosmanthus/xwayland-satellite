@@ -12,6 +12,7 @@ mod scenario;
 pub(crate) mod selection;
 #[cfg(test)]
 mod tests;
+mod trace_codec;
 
 use self::classify::x_kind;
 use self::event::*;
@@ -1248,6 +1249,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     /// once, an activation token requested; X focus waits for the batch end.
     pub(super) fn feed(&mut self, raw: RawEvent) {
         let now = self.now_ms();
+        // Raw and role lines use the model clock; emit's X calls use the tracer clock.
+        // Replay follows line order, not timestamps from those different clock origins.
+        trace_line!(trace_codec::encode(now, &raw));
         for output in self.model.feed(&raw, now) {
             match output {
                 Output::XFocus(change) => self.pending_xfocus = Some(change),
@@ -1765,6 +1769,12 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
         client.commit();
         self.world.insert(entity, (role, Classified(made))).unwrap();
+        trace_line!(trace_codec::role_line(
+            self.now_ms(),
+            window,
+            trace_codec::role_object(&classification, &self.model.roles),
+            false
+        ));
         is_toplevel
     }
 

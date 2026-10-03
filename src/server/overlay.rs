@@ -206,6 +206,15 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let window = *self.world.get::<&x::Window>(entity).unwrap();
         let output = OutputId(self.world.get::<&GlobalName>(output).unwrap().0);
         self.feed(RawEvent::OverlayRehome { window, output });
+        #[cfg(feature = "trace")]
+        if let Some(classification) = self.model.roles.classification(window) {
+            trace_line!(super::trace_codec::role_line(
+                self.now_ms(),
+                window,
+                super::trace_codec::role_object(&classification, &self.model.roles),
+                true
+            ));
+        }
     }
 
     /// Where `output` starts in X's coordinate space.

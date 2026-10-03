@@ -1,3 +1,38 @@
+/// Writes one trace line (feature `trace`): `trace_event!("kind", |l| l.u("w", 1));`.
+/// Without the feature it expands to nothing, so its arguments are never evaluated.
+#[cfg(feature = "trace")]
+macro_rules! trace_event {
+    ($kind:expr, |$line:ident| $body:expr) => {
+        $crate::tracer::emit($kind, |$line: &mut $crate::jsonl::Line| {
+            $body;
+        })
+    };
+    ($kind:expr) => {
+        $crate::tracer::emit($kind, |_: &mut $crate::jsonl::Line| {})
+    };
+}
+#[cfg(not(feature = "trace"))]
+macro_rules! trace_event {
+    ($kind:expr, |$line:ident| $body:expr) => {};
+    ($kind:expr) => {};
+}
+
+#[cfg(feature = "trace")]
+pub(crate) mod tracer;
+
+/// Writes a ready trace line (feature `trace`); nothing without the feature.
+#[cfg(feature = "trace")]
+macro_rules! trace_line {
+    ($line:expr) => {
+        $crate::tracer::emit_line($line)
+    };
+}
+#[cfg(not(feature = "trace"))]
+macro_rules! trace_line {
+    ($line:expr) => {};
+}
+
+mod jsonl;
 mod server;
 pub mod xstate;
 
