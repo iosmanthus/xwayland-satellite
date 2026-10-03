@@ -7,11 +7,11 @@ use super::classify::{classify, x_kind};
 use super::context::derive_context;
 use super::focus::in_family;
 use super::model::{
-    Compositor, FocusState, InputHint, Method, Millis, Model, Output, OutputId, PressRef, RawEvent,
-    Role, RoleTable, SurfaceRef, WindowFacts, XFocusChange, XKind,
+    Classification, Compositor, FocusOnMap, FocusState, InputHint, Method, Millis, Model, Output,
+    OutputId, PressRef, RawEvent, Role, RoleTable, SurfaceRef, WindowFacts, XFocusChange, XKind,
 };
 use super::trace_codec::{FocusCall, Record, RoleKind, decode, role_object};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use xcb::{Xid, x};
 
 /// Evidence which must survive a batch boundary, reset when a window id is reused.
@@ -19,6 +19,148 @@ use xcb::{Xid, x};
 pub struct History {
     pub hints_changed: Vec<x::Window>,
     pub press_mask_changed: Vec<x::Window>,
+    panels: PanelHistory,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecordedPress {
+    window: x::Window,
+    client: u32,
+    at: Millis,
+}
+
+/// Evidence captured at MapFacts, before later presses or anchor changes can affect it.
+#[derive(Debug, Clone)]
+struct PanelMap {
+    facts: WindowFacts,
+    at: Millis,
+    press: Option<RecordedPress>,
+    anchor_mapped: bool,
+    earlier_panel: bool,
+    classification: Option<Classification>,
+    configured: bool,
+    old_panel_focused: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PanelHistory {
+    maps: BTreeMap<x::Window, PanelMap>,
+    mapped: BTreeSet<x::Window>,
+    clients: BTreeMap<x::Window, u32>,
+    last_press: Option<RecordedPress>,
+    past_panels: BTreeSet<x::Window>,
+    old_only_panels: BTreeSet<x::Window>,
+    last_focus: Option<FocusCall>,
+}
+
+impl PanelMap {
+    fn opening_press(&self) -> Option<RecordedPress> {
+        self.press.filter(|press| {
+            press.window != self.facts.window
+                && press.client == self.facts.client
+                && self.at >= press.at
+                && self.at - press.at <= 1500
+        })
+    }
+
+    fn panel_facts(&self) -> bool {
+        x_kind(&self.facts) == XKind::Notification
+            && !self.facts.override_redirect
+            && (self.facts.input != InputHint::False || self.facts.take_focus)
+    }
+
+    fn non_panel(&self) -> bool {
+        self.classification.is_some_and(|c| {
+            c.kind == XKind::Notification
+                && c.focus_on_map == FocusOnMap::None
+                && matches!(
+                    c.role,
+                    Role::OverlayWindow { panel: false, .. } | Role::Toplevel { .. }
+                )
+        })
+    }
+}
+
+impl PanelHistory {
+    fn observe(&mut self, event: &RawEvent, now: Millis) {
+        match event {
+            RawEvent::MapFacts(facts) => {
+                let anchor_mapped = self
+                    .last_press
+                    .is_some_and(|p| self.mapped.contains(&p.window));
+                self.maps.insert(
+                    facts.window,
+                    PanelMap {
+                        facts: facts.clone(),
+                        at: now,
+                        press: self.last_press,
+                        anchor_mapped,
+                        earlier_panel: self.past_panels.contains(&facts.window),
+                        classification: None,
+                        configured: false,
+                        old_panel_focused: false,
+                    },
+                );
+                self.mapped.insert(facts.window);
+                self.clients.insert(facts.window, facts.client);
+                self.old_only_panels.remove(&facts.window);
+            }
+            RawEvent::Press {
+                target: PressRef::X(window),
+                ..
+            } => {
+                // Client bases come from MapFacts, using the connection's mask. An
+                // unknown new press cannot leave an older known press as evidence.
+                self.last_press = self.clients.get(window).map(|&client| RecordedPress {
+                    window: *window,
+                    client,
+                    at: now,
+                });
+            }
+            RawEvent::PopupFirstConfigure { window } => {
+                if let Some(map) = self.maps.get_mut(window) {
+                    map.configured = true;
+                }
+            }
+            RawEvent::Unmap { window } | RawEvent::Destroy { window } => {
+                if self
+                    .maps
+                    .remove(window)
+                    .is_some_and(|map| map.old_panel_focused)
+                {
+                    self.past_panels.insert(*window);
+                }
+                self.mapped.remove(window);
+                self.old_only_panels.remove(window);
+                if matches!(event, RawEvent::Destroy { .. }) {
+                    // Remap evidence belongs to the old X resource, not a reused id.
+                    self.past_panels.remove(window);
+                    self.clients.remove(window);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_batch(&mut self, batch: &Batch) {
+        let [call] = batch.old.as_slice() else {
+            return;
+        };
+        let Some(window) = old_window(call) else {
+            return;
+        };
+        if !first_configure_map(batch, window).is_some_and(PanelMap::panel_facts) {
+            return;
+        }
+        // Either old focus method can prove an earlier panel episode, including
+        // agreeing batches. Only the ruled SetInput divergences seed old-only panels.
+        if let Some(current) = self.maps.get_mut(&window) {
+            current.old_panel_focused = true;
+        }
+        if unmapped_anchor_not_panel(batch) || remap_fresh_facts(batch) {
+            self.old_only_panels.insert(window);
+        }
+    }
 }
 
 impl History {
@@ -131,6 +273,11 @@ pub enum ChangeId {
     HintsChangedAfterMap,
     Smell5OverrideRedirectPress,
     Q1RestoreMethod,
+    UnmappedAnchorNotPanel,
+    RemapFreshFacts,
+    OldOnlyPanelGone,
+    OldHeldByStalePanel,
+    OverlayLeaveClears,
 }
 
 /// Same focus outcome under the fixed mapping (the output name is ignored, rule 13 has its
@@ -212,6 +359,7 @@ pub fn replay_with_report(trace: &str) -> ReplayReport {
         match record {
             Record::Raw { t, event } => {
                 let end = event == RawEvent::BatchEnd;
+                history.panels.observe(&event, t);
                 history.observe(&event, &model, t);
                 batch.history.press_mask_changed = history.press_mask_changed.clone();
                 // A window gone, by unmap, destroy or reparent-away (a `Destroy` in the trace),
@@ -224,9 +372,15 @@ pub fn replay_with_report(trace: &str) -> ReplayReport {
                         batch.new.push(change);
                     }
                 }
+                if let RawEvent::RoleCreate { window, .. } = event
+                    && let Some(map) = history.panels.maps.get_mut(&window)
+                {
+                    map.classification = model.roles.classification(window);
+                }
                 batch.raw.push(event);
                 if end {
                     report.batches += 1;
+                    history.panels.finish_batch(&batch);
                     let next = fresh(batch.index + 1, &model, &closing, &history);
                     let done = std::mem::replace(&mut batch, next);
                     if !batch_agrees(&done) {
@@ -234,7 +388,10 @@ pub fn replay_with_report(trace: &str) -> ReplayReport {
                     }
                 }
             }
-            Record::FocusCall { call, .. } => batch.old.push(call),
+            Record::FocusCall { call, .. } => {
+                history.panels.last_focus = Some(call.clone());
+                batch.old.push(call);
+            }
             Record::CloseCall { window, .. } => {
                 if !closing.contains(&window) {
                     closing.push(window);
@@ -279,7 +436,7 @@ pub fn replay_with_report(trace: &str) -> ReplayReport {
     report
 }
 
-const CHANGES: [ChangeId; 17] = [
+const CHANGES: [ChangeId; 22] = [
     ChangeId::Rule1PopupKeepsFocus,
     ChangeId::Rule2EnterThenLeave,
     ChangeId::Rule5PressFocusesPressed,
@@ -297,6 +454,11 @@ const CHANGES: [ChangeId; 17] = [
     ChangeId::HintsChangedAfterMap,
     ChangeId::Smell5OverrideRedirectPress,
     ChangeId::Q1RestoreMethod,
+    ChangeId::UnmappedAnchorNotPanel,
+    ChangeId::RemapFreshFacts,
+    ChangeId::OldOnlyPanelGone,
+    ChangeId::OldHeldByStalePanel,
+    ChangeId::OverlayLeaveClears,
 ];
 
 fn old_window(call: &FocusCall) -> Option<x::Window> {
@@ -516,8 +678,132 @@ fn explains(id: ChangeId, divergence: &Divergence) -> bool {
                 (Some(FocusCall::TakeFocus(old)), Some(XFocusChange::Window { window, method: Method::SetInput, .. }))
                     if old == window && b.roles.classification(*window).is_some_and(|c| c.role.is_toplevel()))
         }
+        (ChangeId::UnmappedAnchorNotPanel, Divergence::Focus(b)) => unmapped_anchor_not_panel(b),
+        (ChangeId::RemapFreshFacts, Divergence::Focus(b)) => remap_fresh_facts(b),
+        (ChangeId::OldOnlyPanelGone, Divergence::Focus(b)) => old_only_panel_gone(b),
+        (ChangeId::OldHeldByStalePanel, Divergence::Focus(b)) => old_held_by_stale_panel(b),
+        (ChangeId::OverlayLeaveClears, Divergence::Focus(b)) => overlay_leave_clears(b),
         _ => false,
     }
+}
+
+/// A single old first-configure focus, tied to the current map episode. Mixed
+/// batches stay findings rather than assigning unrelated calls to a panel change.
+fn first_configure_focus(batch: &Batch) -> Option<(x::Window, &PanelMap)> {
+    let [FocusCall::SetInput { window, .. }] = batch.old.as_slice() else {
+        return None;
+    };
+    first_configure_map(batch, *window).map(|map| (*window, map))
+}
+
+fn first_configure_map(batch: &Batch, window: x::Window) -> Option<&PanelMap> {
+    let raw = batch
+        .raw
+        .strip_suffix(&[RawEvent::BatchEnd])
+        .unwrap_or(&batch.raw);
+    if !matches!(raw, [RawEvent::PopupFirstConfigure { window: w }] if *w == window) {
+        return None;
+    }
+    let map = batch.history.panels.maps.get(&window)?;
+    (!map.configured && batch.history.panels.mapped.contains(&window)).then_some(map)
+}
+
+fn unmapped_anchor_not_panel(batch: &Batch) -> bool {
+    batch.new.is_empty()
+        && first_configure_focus(batch).is_some_and(|(_, map)| {
+            map.panel_facts()
+                && map.non_panel()
+                && map.facts.transient_for.is_none()
+                && map.opening_press().is_some()
+                && !map.anchor_mapped
+        })
+}
+
+fn remap_fresh_facts(batch: &Batch) -> bool {
+    batch.new.is_empty()
+        && first_configure_focus(batch).is_some_and(|(_, map)| {
+            map.panel_facts()
+                && map.non_panel()
+                && map.earlier_panel
+                && map.opening_press().is_none()
+        })
+}
+
+fn old_only_panel_gone(batch: &Batch) -> bool {
+    let Some(desired) = batch.before.desired else {
+        return false;
+    };
+    batch.new.is_empty()
+        && !batch.old.is_empty()
+        && batch.before.applied.as_ref().and_then(new_window) == Some(desired)
+        && batch
+            .old
+            .iter()
+            .all(|call| matches!(call, FocusCall::SetInput { window, .. } if *window == desired))
+        && batch.raw.iter().any(|event| match event {
+            RawEvent::Unmap { window } | RawEvent::Destroy { window } => {
+                batch.history.panels.old_only_panels.contains(window)
+            }
+            _ => false,
+        })
+}
+
+fn old_held_by_stale_panel(batch: &Batch) -> bool {
+    let [
+        XFocusChange::Window {
+            window,
+            method: Method::SetInput,
+            ..
+        },
+    ] = batch.new.as_slice()
+    else {
+        return false;
+    };
+    let raw = batch
+        .raw
+        .strip_suffix(&[RawEvent::BatchEnd])
+        .unwrap_or(&batch.raw);
+    let Some((
+        RawEvent::KeyboardEnter {
+            target: SurfaceRef::X(entered),
+            ..
+        },
+        preceding,
+    )) = raw.split_last()
+    else {
+        return false;
+    };
+    batch.old.is_empty()
+        && window == entered
+        && batch.before.panel.is_none()
+        && preceding.iter().all(|event| {
+            matches!(
+                event,
+                RawEvent::KeyboardLeave {
+                    target: SurfaceRef::Overlay(_),
+                    ..
+                }
+            ) || matches!(event, RawEvent::PointerEnter { window: w } if w == entered)
+        })
+        && batch
+            .history
+            .panels
+            .old_only_panels
+            .iter()
+            .any(|w| batch.history.panels.mapped.contains(w))
+}
+
+fn overlay_leave_clears(batch: &Batch) -> bool {
+    batch.old.is_empty()
+        && batch.new == [XFocusChange::None]
+        && matches!(&batch.history.panels.last_focus, Some(FocusCall::SetInput { window, .. }) if *window == x::WINDOW_NONE)
+        && batch.raw.iter().enumerate().any(|(i, event)| {
+            matches!(event, RawEvent::KeyboardLeave { target: SurfaceRef::Overlay(output), .. }
+                if batch.before.compositor == Compositor::Overlay(*output))
+                && !batch.raw[i + 1..]
+                    .iter()
+                    .any(|e| matches!(e, RawEvent::KeyboardEnter { .. }))
+        })
 }
 
 #[test]
@@ -548,6 +834,10 @@ fn differential_replay() {
             path.display()
         );
         let report = replay_with_report(&trace);
+        let mut file_counts: BTreeMap<Option<ChangeId>, usize> =
+            CHANGES.into_iter().map(|id| (Some(id), 0)).collect();
+        file_counts.insert(None, 0);
+        let mut controller_batches: BTreeMap<ChangeId, Vec<usize>> = BTreeMap::new();
         undecodable += report.undecodable;
         eprintln!(
             "{}: batches={}, undecodable={}, unknown={}, unfinished_batch={}, decode_errors={:?}",
@@ -561,6 +851,12 @@ fn differential_replay() {
         for d in report.divergences {
             let id = allowed(&d);
             *counts.entry(id).or_default() += 1;
+            *file_counts.entry(id).or_default() += 1;
+            if let (Some(id), Divergence::Focus(batch)) = (id, &d)
+                && id >= ChangeId::UnmappedAnchorNotPanel
+            {
+                controller_batches.entry(id).or_default().push(batch.index);
+            }
             if id.is_none() && unattributed.len() < 20 {
                 match &d {
                     Divergence::Focus(b) => eprintln!("unattributed focus: batch {}", b.index),
@@ -574,6 +870,10 @@ fn differential_replay() {
                 unattributed.push((path.clone(), d));
             }
         }
+        eprintln!(
+            "{}: per-change counts={file_counts:?}; controller batches={controller_batches:?}",
+            path.display()
+        );
     }
     eprintln!("divergences by change: {counts:#?}; undecodable lines: {undecodable}");
     assert!(
@@ -794,6 +1094,279 @@ mod allowance_tests {
         }
     }
 
+    fn controller_case(id: ChangeId) -> Batch {
+        let mut b = batch();
+        b.old.clear();
+        b.new.clear();
+        match id {
+            ChangeId::UnmappedAnchorNotPanel | ChangeId::RemapFreshFacts => {
+                let facts = facts(5).types(&[super::super::model::NetWmType::Notification]);
+                let classification = Classification {
+                    kind: XKind::Notification,
+                    role: Role::OverlayWindow {
+                        output: O1,
+                        panel: false,
+                    },
+                    focus_on_map: FocusOnMap::None,
+                };
+                let entry = b.roles.windows.get_mut(&win(5)).unwrap();
+                entry.facts = facts.clone();
+                entry.classification = Some(classification);
+                b.history.panels.mapped.insert(win(5));
+                b.history.panels.maps.insert(
+                    win(5),
+                    PanelMap {
+                        facts,
+                        at: 1500,
+                        press: (id == ChangeId::UnmappedAnchorNotPanel).then_some(RecordedPress {
+                            window: win(1),
+                            client: 0,
+                            at: 0,
+                        }),
+                        anchor_mapped: false,
+                        earlier_panel: id == ChangeId::RemapFreshFacts,
+                        classification: Some(classification),
+                        configured: false,
+                        old_panel_focused: false,
+                    },
+                );
+                b.old = vec![input(5)];
+                b.raw = vec![
+                    RawEvent::PopupFirstConfigure { window: win(5) },
+                    RawEvent::BatchEnd,
+                ];
+            }
+            ChangeId::OldOnlyPanelGone => {
+                b.history.panels.old_only_panels.insert(win(5));
+                b.history.panels.mapped.insert(win(5));
+                b.before.desired = Some(win(1));
+                b.before.applied = Some(focus(1));
+                b.old = vec![input(1), input(1)];
+                b.raw = vec![RawEvent::Unmap { window: win(5) }, RawEvent::BatchEnd];
+            }
+            ChangeId::OldHeldByStalePanel => {
+                b.history.panels.old_only_panels.insert(win(5));
+                b.history.panels.mapped.insert(win(5));
+                b.new = vec![focus(1)];
+                b.raw = vec![
+                    RawEvent::PointerEnter { window: win(1) },
+                    RawEvent::KeyboardLeave {
+                        target: SurfaceRef::Overlay(O1),
+                        serial: 1,
+                    },
+                    enter(SurfaceRef::X(win(1))),
+                    RawEvent::BatchEnd,
+                ];
+            }
+            ChangeId::OverlayLeaveClears => {
+                b.before.compositor = Compositor::Overlay(O1);
+                b.history.panels.last_focus = Some(input(0));
+                b.new = vec![XFocusChange::None];
+                b.raw = vec![
+                    RawEvent::KeyboardLeave {
+                        target: SurfaceRef::Overlay(O1),
+                        serial: 1,
+                    },
+                    RawEvent::BatchEnd,
+                ];
+            }
+            _ => panic!("not a controller addition: {id:?}"),
+        }
+        b
+    }
+
+    #[test]
+    fn unmapped_anchor_is_attributed() {
+        let id = ChangeId::UnmappedAnchorNotPanel;
+        assert_eq!(allowed(&Divergence::Focus(controller_case(id))), Some(id));
+    }
+
+    #[test]
+    fn mapped_anchor_stays_unattributed() {
+        let mut b = controller_case(ChangeId::UnmappedAnchorNotPanel);
+        b.history
+            .panels
+            .maps
+            .get_mut(&win(5))
+            .unwrap()
+            .anchor_mapped = true;
+        assert_eq!(allowed(&Divergence::Focus(b)), None);
+    }
+
+    #[test]
+    fn fresh_remap_is_attributed() {
+        let id = ChangeId::RemapFreshFacts;
+        assert_eq!(allowed(&Divergence::Focus(controller_case(id))), Some(id));
+    }
+
+    #[test]
+    fn remap_without_an_earlier_panel_stays_unattributed() {
+        let mut b = controller_case(ChangeId::RemapFreshFacts);
+        b.history
+            .panels
+            .maps
+            .get_mut(&win(5))
+            .unwrap()
+            .earlier_panel = false;
+        assert_eq!(allowed(&Divergence::Focus(b)), None);
+    }
+
+    #[test]
+    fn old_only_panel_restore_is_attributed() {
+        let id = ChangeId::OldOnlyPanelGone;
+        assert_eq!(allowed(&Divergence::Focus(controller_case(id))), Some(id));
+    }
+
+    #[test]
+    fn restore_to_a_window_not_already_applied_stays_unattributed() {
+        let mut b = controller_case(ChangeId::OldOnlyPanelGone);
+        b.before.applied = Some(focus(2));
+        assert_eq!(allowed(&Divergence::Focus(b)), None);
+    }
+
+    #[test]
+    fn old_stale_panel_hold_is_attributed() {
+        let id = ChangeId::OldHeldByStalePanel;
+        assert_eq!(allowed(&Divergence::Focus(controller_case(id))), Some(id));
+    }
+
+    #[test]
+    fn unmapped_stale_panel_cannot_explain_a_hold() {
+        let mut b = controller_case(ChangeId::OldHeldByStalePanel);
+        b.history.panels.mapped.remove(&win(5));
+        assert_eq!(allowed(&Divergence::Focus(b)), None);
+    }
+
+    #[test]
+    fn overlay_leave_after_old_clear_is_attributed() {
+        let id = ChangeId::OverlayLeaveClears;
+        assert_eq!(allowed(&Divergence::Focus(controller_case(id))), Some(id));
+    }
+
+    #[test]
+    fn overlay_leave_after_old_window_focus_stays_unattributed() {
+        let mut b = controller_case(ChangeId::OverlayLeaveClears);
+        b.history.panels.last_focus = Some(input(2));
+        assert_eq!(allowed(&Divergence::Focus(b)), None);
+    }
+
+    #[test]
+    fn opening_press_evidence_is_frozen_at_map_with_the_recorded_client() {
+        let mut h = PanelHistory::default();
+        let mut anchor = facts(0x200001);
+        // Deliberately differs from the legacy mask: use recorded client bases.
+        anchor.client = 77;
+        let mut panel = facts(0x400005);
+        panel.client = 77;
+        h.observe(&RawEvent::MapFacts(anchor.clone()), 0);
+        h.observe(&press(0x200001), 0);
+        h.observe(
+            &RawEvent::Unmap {
+                window: anchor.window,
+            },
+            1,
+        );
+        h.observe(&RawEvent::MapFacts(panel.clone()), 1500);
+        assert!(h.maps[&panel.window].opening_press().is_some());
+        assert!(!h.maps[&panel.window].anchor_mapped);
+
+        // A later remap of the anchor or a press cannot rewrite the map's proof.
+        h.observe(&RawEvent::MapFacts(anchor), 1501);
+        h.observe(&press(0x400005), 1501);
+        assert_eq!(
+            h.maps[&panel.window].opening_press().unwrap().window,
+            win(0x200001)
+        );
+        assert!(!h.maps[&panel.window].anchor_mapped);
+        h.observe(
+            &RawEvent::Unmap {
+                window: panel.window,
+            },
+            1502,
+        );
+        h.observe(&RawEvent::MapFacts(panel.clone()), 1503);
+        assert!(
+            h.maps[&panel.window].opening_press().is_none(),
+            "self press"
+        );
+
+        h.observe(&press(0x200001), 2000);
+        h.observe(&RawEvent::MapFacts(panel.clone()), 3501);
+        assert!(
+            h.maps[&panel.window].opening_press().is_none(),
+            "expired press"
+        );
+        h.observe(&press(0x200001), 4000);
+        h.observe(&press(99), 4001);
+        h.observe(&RawEvent::MapFacts(panel.clone()), 4002);
+        assert!(
+            h.maps[&panel.window].opening_press().is_none(),
+            "unknown latest press"
+        );
+        h.observe(&press(0x200001), 5000);
+        panel.client = 78;
+        h.observe(&RawEvent::MapFacts(panel.clone()), 5001);
+        assert!(
+            h.maps[&panel.window].opening_press().is_none(),
+            "another client"
+        );
+    }
+
+    #[test]
+    fn old_panel_history_survives_only_a_remap_of_the_same_resource() {
+        for gone in [
+            RawEvent::Unmap { window: win(5) },
+            RawEvent::Destroy { window: win(5) },
+        ] {
+            let b = controller_case(ChangeId::UnmappedAnchorNotPanel);
+            let mut h = b.history.panels.clone();
+            h.observe(&RawEvent::PopupFirstConfigure { window: win(5) }, 1500);
+            h.finish_batch(&b);
+            assert!(h.old_only_panels.contains(&win(5)));
+            assert!(h.maps[&win(5)].old_panel_focused);
+
+            // Cleanup is raw-event driven, including agreeing or unfinished batches.
+            h.observe(&gone, 1501);
+            assert!(!h.old_only_panels.contains(&win(5)));
+            assert!(!h.mapped.contains(&win(5)));
+            h.observe(
+                &RawEvent::MapFacts(b.history.panels.maps[&win(5)].facts.clone()),
+                4000,
+            );
+            assert_eq!(
+                h.maps[&win(5)].earlier_panel,
+                matches!(gone, RawEvent::Unmap { .. })
+            );
+            assert!(!h.maps[&win(5)].configured);
+            assert!(!h.maps[&win(5)].old_panel_focused);
+            assert!(h.maps[&win(5)].classification.is_none());
+            assert!(!h.old_only_panels.contains(&win(5)));
+        }
+
+        for method in [Method::SetInput, Method::TakeFocus] {
+            let mut b = controller_case(ChangeId::UnmappedAnchorNotPanel);
+            b.old = vec![match method {
+                Method::SetInput => input(5),
+                Method::TakeFocus => FocusCall::TakeFocus(win(5)),
+            }];
+            b.new = vec![XFocusChange::Window {
+                window: win(5),
+                method,
+                primary_output: None,
+            }];
+            let mut h = b.history.panels.clone();
+            h.finish_batch(&b);
+            assert!(
+                h.maps[&win(5)].old_panel_focused,
+                "retain agreeing old panel evidence"
+            );
+            assert!(
+                h.old_only_panels.is_empty(),
+                "agreement is not an old-only panel"
+            );
+        }
+    }
+
     #[test]
     fn one_batch_for_each_allowance() {
         let mut cases = Vec::new();
@@ -919,6 +1492,9 @@ mod allowance_tests {
         b.new = vec![focus(1)];
         cases.push((ChangeId::Q1RestoreMethod, Divergence::Focus(b)));
 
+        for id in CHANGES.into_iter().skip(17) {
+            cases.push((id, Divergence::Focus(controller_case(id))));
+        }
         assert_eq!(cases.iter().map(|(id, _)| *id).collect::<Vec<_>>(), CHANGES);
         for (id, d) in cases {
             assert!(explains(id, &d), "{id:?}: {d:#?}");
@@ -1134,6 +1710,69 @@ mod replay_tests {
         };
         raw(trace, t, RawEvent::MapFacts(facts));
         raw(trace, t, event);
+    }
+
+    #[test]
+    fn controller_allowances_take_exactly_the_ruled_batches() {
+        let trace = include_str!("../../tests/scenarios/traces/2026-10-03-1.jsonl");
+        let mut batches: BTreeMap<ChangeId, Vec<usize>> = BTreeMap::new();
+        for d in replay(trace) {
+            if let Some(id) = allowed(&d)
+                && id >= ChangeId::UnmappedAnchorNotPanel
+            {
+                let Divergence::Focus(batch) = d else {
+                    panic!("new role allowance");
+                };
+                batches.entry(id).or_default().push(batch.index);
+            }
+        }
+        assert_eq!(
+            batches,
+            BTreeMap::from([
+                (ChangeId::UnmappedAnchorNotPanel, vec![134, 137, 788, 791]),
+                (ChangeId::RemapFreshFacts, vec![165, 181]),
+                (ChangeId::OldOnlyPanelGone, vec![139]),
+                (ChangeId::OldHeldByStalePanel, vec![172, 184, 188, 191]),
+                (ChangeId::OverlayLeaveClears, vec![218]),
+            ])
+        );
+    }
+
+    #[test]
+    fn overlay_leave_uses_the_previous_batchs_last_old_call() {
+        for (calls, expected) in [
+            (vec![1, 0], Some(ChangeId::OverlayLeaveClears)),
+            (vec![0, 1], None),
+            (vec![], None),
+        ] {
+            let mut trace = String::new();
+            raw(
+                &mut trace,
+                0,
+                RawEvent::KeyboardEnter {
+                    target: SurfaceRef::Overlay(OutputId(50)),
+                    serial: 1,
+                },
+            );
+            for window in calls {
+                trace += &format!(
+                    "{{\"t\":0,\"k\":\"x_call\",\"call\":\"focus_window\",\"w\":{window},\"output\":null}}\n"
+                );
+            }
+            raw(&mut trace, 0, RawEvent::BatchEnd);
+            raw(
+                &mut trace,
+                1,
+                RawEvent::KeyboardLeave {
+                    target: SurfaceRef::Overlay(OutputId(50)),
+                    serial: 2,
+                },
+            );
+            raw(&mut trace, 1, RawEvent::BatchEnd);
+            let d = replay(&trace).pop().unwrap();
+            assert!(matches!(&d, Divergence::Focus(b) if b.index == 1));
+            assert_eq!(allowed(&d), expected);
+        }
     }
 
     #[test]
