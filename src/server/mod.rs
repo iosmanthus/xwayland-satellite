@@ -8,6 +8,8 @@ mod focus;
 pub(crate) mod model;
 mod overlay;
 #[cfg(test)]
+mod replay;
+#[cfg(test)]
 mod scenario;
 pub(crate) mod selection;
 #[cfg(test)]
