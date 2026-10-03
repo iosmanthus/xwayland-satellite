@@ -235,7 +235,10 @@ pub fn unroute() -> Output {
 }
 
 pub fn token(window: x::Window, surface: KbTarget) -> Output {
-    Output::ActivationToken { window, surface }
+    Output::ActivationToken {
+        window,
+        surface: Some(surface),
+    }
 }
 
 // Facts of the windows the fixtures use (sizes and positions from the server tests and the

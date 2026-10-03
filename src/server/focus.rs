@@ -114,7 +114,10 @@ impl FocusState {
                 FocusOnMap::None => {}
             },
             Event::Gone(window) => self.gone(window, roles),
-            Event::ActivationRequested(window) => self.activation(window, roles, &mut out),
+            Event::ActivationRequested(window) => self.activation(window, roles, &mut out, false),
+            Event::ClientActivationRequested(window) => {
+                self.activation(window, roles, &mut out, true)
+            }
             Event::OverlayGone(output) => {
                 if self.compositor == Compositor::Overlay(output) {
                     self.compositor = Compositor::Nothing;
@@ -302,19 +305,27 @@ impl FocusState {
     }
 
     /// Rule 12.
-    fn activation(&mut self, w: x::Window, roles: &RoleTable, out: &mut Vec<Output>) {
-        match self.compositor {
-            Compositor::X(v) => out.push(Output::ActivationToken {
-                window: w,
-                surface: KbTarget::X(v),
-            }),
-            Compositor::Overlay(o) => out.push(Output::ActivationToken {
-                window: w,
-                surface: KbTarget::Overlay(o),
-            }),
-            Compositor::Other | Compositor::Nothing => {
-                warn!("no surface with keyboard focus to activate {w:?} from");
+    fn activation(
+        &mut self,
+        w: x::Window,
+        roles: &RoleTable,
+        out: &mut Vec<Output>,
+        explicit: bool,
+    ) {
+        let surface = match self.compositor {
+            Compositor::X(v) => Some(KbTarget::X(v)),
+            Compositor::Overlay(o) => Some(KbTarget::Overlay(o)),
+            Compositor::Other | Compositor::Nothing if explicit => {
+                self.last_toplevel.map(KbTarget::X)
             }
+            Compositor::Other | Compositor::Nothing => None,
+        };
+        // Only a client's explicit request can activate from outside X. Let the compositor
+        // decide whether to honor it, even when no surface can be named.
+        if explicit || surface.is_some() {
+            out.push(Output::ActivationToken { window: w, surface });
+        } else {
+            warn!("no surface with keyboard focus to activate {w:?} from");
         }
         if self.compositor == Compositor::X(w) {
             self.pending_activation = None;
@@ -1127,7 +1138,7 @@ mod tests {
 
     // --- Rule 12 ---
 
-    fn token(w: u32, surface: KbTarget) -> Output {
+    fn token(w: u32, surface: Option<KbTarget>) -> Output {
         Output::ActivationToken {
             window: win(w),
             surface,
@@ -1140,7 +1151,10 @@ mod tests {
         let mut t = world();
         t.panel_open(PANEL, Compositor::X(win(OTHER)), Some(OTHER));
         let out = t.ev(&[Event::ActivationRequested(win(OTHER)), BatchEnd]);
-        assert_eq!(out, vec![token(OTHER, KbTarget::X(win(OTHER))), xf(OTHER)]);
+        assert_eq!(
+            out,
+            vec![token(OTHER, Some(KbTarget::X(win(OTHER)))), xf(OTHER)]
+        );
         assert_eq!((t.fs.panel, t.fs.pending_activation), (None, None));
     }
 
@@ -1150,7 +1164,7 @@ mod tests {
         let mut t = world();
         t.panel_open(PANEL, Compositor::X(win(PANEL)), None);
         let out = t.ev(&[Event::ActivationRequested(win(PANEL)), BatchEnd]);
-        assert_eq!(out, vec![token(PANEL, KbTarget::X(win(PANEL)))]);
+        assert_eq!(out, vec![token(PANEL, Some(KbTarget::X(win(PANEL))))]);
         assert_eq!(t.fs.panel, Some(win(PANEL)));
     }
 
@@ -1161,7 +1175,7 @@ mod tests {
         t.panel_open(PANEL, Compositor::X(win(MEETING)), Some(MEETING));
         assert_eq!(
             t.ev(&[Event::ActivationRequested(win(OTHER)), BatchEnd]),
-            vec![token(OTHER, KbTarget::X(win(MEETING)))]
+            vec![token(OTHER, Some(KbTarget::X(win(MEETING))))]
         );
         assert_eq!(t.ev(&[Event::Key { pressed: false }, BatchEnd]), vec![]);
         assert_eq!(
@@ -1191,7 +1205,7 @@ mod tests {
                 Event::ActivationRequested(win(A | 30)),
                 BatchEnd
             ]),
-            vec![token(A | 30, KbTarget::X(win(MEETING)))]
+            vec![token(A | 30, Some(KbTarget::X(win(MEETING))))]
         );
         assert_eq!(
             t.ev(&[leave_x(MEETING), enter_x(A | 30), BatchEnd]),
@@ -1224,6 +1238,43 @@ mod tests {
         t.fs.compositor = Compositor::Other;
         assert_eq!(t.ev(&[Event::ActivationRequested(win(OTHER))]), vec![]);
         assert_eq!(t.fs.pending_activation, Some(win(OTHER)));
+    }
+
+    #[test]
+    fn rule12_client_request_without_x_focus_still_asks() {
+        let outputs = [
+            (Compositor::Other, Some(win(MAIN))),
+            (Compositor::Nothing, None),
+        ]
+        .map(|(compositor, last_toplevel)| {
+            let mut t = world();
+            t.fs.compositor = compositor;
+            t.fs.last_toplevel = last_toplevel;
+            let out = t.ev(&[Event::ClientActivationRequested(win(OTHER)), BatchEnd]);
+            assert_eq!(t.fs.pending_activation, Some(win(OTHER)));
+            out
+        });
+        assert_eq!(
+            outputs,
+            [
+                vec![token(OTHER, Some(KbTarget::X(win(MAIN))))],
+                vec![token(OTHER, None)],
+            ]
+        );
+    }
+
+    #[test]
+    fn rule12_activation_from_another_client_then_enter_focuses() {
+        let mut t = world();
+        t.panel_open(PANEL, Compositor::Other, Some(MAIN));
+        t.fs.last_toplevel = Some(win(MAIN));
+        assert_eq!(
+            t.ev(&[Event::ClientActivationRequested(win(OTHER)), BatchEnd]),
+            vec![token(OTHER, Some(KbTarget::X(win(MAIN))))]
+        );
+        assert_eq!(t.fs.pending_activation, Some(win(OTHER)));
+        assert_eq!(t.ev(&[enter_x(OTHER), BatchEnd]), vec![xf(OTHER)]);
+        assert_eq!((t.fs.panel, t.fs.pending_activation), (None, None));
     }
 
     // --- Rule 13 ---
@@ -1288,7 +1339,7 @@ mod tests {
         );
         assert_eq!(
             t.ev(&[Event::ActivationRequested(win(ghost)), BatchEnd]),
-            vec![token(ghost, KbTarget::X(win(MAIN)))]
+            vec![token(ghost, Some(KbTarget::X(win(MAIN))))]
         );
         assert_eq!(t.ev(&[Event::Gone(win(ghost)), BatchEnd]), vec![]);
         assert_eq!(t.fs.pending_activation, None);

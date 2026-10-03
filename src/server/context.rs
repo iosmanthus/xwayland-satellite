@@ -283,7 +283,7 @@ pub fn translate(raw: &RawEvent, roles: &RoleTable) -> Vec<MachineInput> {
             vec![Focus(Event::Gone(*window))]
         }
         RawEvent::ActiveWindowRequest { window } => {
-            vec![Focus(Event::ActivationRequested(*window))]
+            vec![Focus(Event::ClientActivationRequested(*window))]
         }
         RawEvent::KeyboardEnter { target, .. } => keyboard_target(*target)
             .map(|t| Focus(Event::KeyboardEnter(t)))
@@ -702,7 +702,7 @@ mod tests {
             ),
             (
                 RawEvent::ActiveWindowRequest { window: w(A | 1) },
-                vec![Focus(Event::ActivationRequested(w(A | 1)))],
+                vec![Focus(Event::ClientActivationRequested(w(A | 1)))],
             ),
             (
                 RawEvent::KeyboardEnter {
@@ -903,7 +903,7 @@ mod tests {
             ),
             vec![Output::ActivationToken {
                 window: win(A | 6),
-                surface: KbTarget::X(win(A | 1))
+                surface: Some(KbTarget::X(win(A | 1)))
             }]
         );
     }

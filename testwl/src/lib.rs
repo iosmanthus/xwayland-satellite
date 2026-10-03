@@ -287,6 +287,22 @@ struct ActivationTokenData {
     constructed: bool,
 }
 
+/// Activation requests received on the wire, including requests the compositor declines.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ActivationEvent {
+    TokenRequested,
+    TokenCommitted {
+        token: String,
+        serial: Option<u32>,
+        app_id: Option<String>,
+        surface: Option<SurfaceId>,
+    },
+    Activate {
+        token: String,
+        surface: SurfaceId,
+    },
+}
+
 pub struct LockedPointer {
     pub surface: SurfaceId,
     pub cursor_hint: Option<Vec2f>,
@@ -338,6 +354,7 @@ struct State {
     xdg_activation: Option<XdgActivationV1>,
     valid_tokens: HashSet<String>,
     token_counter: u32,
+    activation_events: Vec<ActivationEvent>,
 }
 
 impl Default for State {
@@ -376,6 +393,7 @@ impl Default for State {
             xdg_activation: None,
             valid_tokens: HashSet::new(),
             token_counter: 0,
+            activation_events: Vec::new(),
         }
     }
 }
@@ -704,6 +722,10 @@ impl Server {
     #[track_caller]
     pub fn get_focused(&self) -> Option<SurfaceId> {
         self.state.get_focused()
+    }
+
+    pub fn take_activation_events(&mut self) -> Vec<ActivationEvent> {
+        std::mem::take(&mut self.state.activation_events)
     }
 
     #[track_caller]
@@ -2644,11 +2666,18 @@ impl Dispatch<XdgActivationV1, ()> for State {
         match request {
             xdg_activation_v1::Request::Destroy => {}
             xdg_activation_v1::Request::GetActivationToken { id } => {
+                state
+                    .activation_events
+                    .push(ActivationEvent::TokenRequested);
                 data_init.init(id, Mutex::new(ActivationTokenData::default()));
             }
             xdg_activation_v1::Request::Activate { token, surface } => {
+                let surface_id = SurfaceId(surface.id().protocol_id());
+                state.activation_events.push(ActivationEvent::Activate {
+                    token: token.clone(),
+                    surface: surface_id,
+                });
                 if state.valid_tokens.remove(&token) {
-                    let surface_id = SurfaceId(surface.id().protocol_id());
                     state.focus_toplevel(surface_id);
                 }
             }
@@ -2712,6 +2741,19 @@ impl Dispatch<XdgActivationTokenV1, Mutex<ActivationTokenData>> for State {
                 }
                 data.constructed = true;
 
+                let activation_token = state.token_counter.to_string();
+                state
+                    .activation_events
+                    .push(ActivationEvent::TokenCommitted {
+                        token: activation_token.clone(),
+                        serial: data.serial.as_ref().map(|(serial, _)| *serial),
+                        app_id: data.app_id.clone(),
+                        surface: data
+                            .surface
+                            .as_ref()
+                            .map(|s| SurfaceId(s.id().protocol_id())),
+                    });
+
                 // Require a valid serial, otherwise ignore the activation.
                 // This matches niri's behavior: https://github.com/YaLTeR/niri/blob/5e549e13238a853f8860e29621ab6b31ee1b9ee4/src/handlers/mod.rs#L712-L723
                 let valid = if let (Some((serial, seat)), Some(surface_data)) = (
@@ -2728,7 +2770,6 @@ impl Dispatch<XdgActivationTokenV1, Mutex<ActivationTokenData>> for State {
                     false
                 };
 
-                let activation_token = state.token_counter.to_string();
                 state.token_counter += 1;
                 if valid {
                     state.valid_tokens.insert(activation_token.clone());

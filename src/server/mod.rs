@@ -1326,26 +1326,23 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         Some(name.0.clone())
     }
 
-    /// Asks the compositor to activate `window`, from the surface its keyboard focus is
-    /// on (design rule 12; the token names `window`'s class, smell #16).
-    fn request_activation_token(&mut self, window: x::Window, surface: KbTarget) {
+    /// Asks the compositor to activate `window`, naming its class and the model's chosen
+    /// source surface when available. A missing surface does not cancel the request.
+    fn request_activation_token(&mut self, window: x::Window, surface: Option<KbTarget>) {
         let Some(activation_state) = self.activation_state.as_ref() else {
             return;
         };
         let surface = match surface {
-            KbTarget::X(w) => self
+            Some(KbTarget::X(w)) => self
                 .windows
                 .get(&w)
                 .and_then(|&e| self.world.get::<&client::wl_surface::WlSurface>(e).ok())
                 .map(|s| (*s).clone()),
-            KbTarget::Overlay(output) => self
+            Some(KbTarget::Overlay(output)) => self
                 .output_entity(output)
                 .and_then(|e| self.world.get::<&overlay::Overlay>(e).ok())
                 .map(|o| o.surface().clone()),
-        };
-        let Some(surface) = surface else {
-            warn!("no surface to activate {window:?} from");
-            return;
+            None => None,
         };
         let app_id = self
             .windows
@@ -1359,7 +1356,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 smithay_client_toolkit::activation::RequestData {
                     app_id,
                     seat_and_serial: self.last_kb_serial.clone(),
-                    surface: Some(surface),
+                    surface,
                 },
             ),
         );

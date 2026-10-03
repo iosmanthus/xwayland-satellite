@@ -1234,6 +1234,139 @@ fn last_activated_toplevel_is_focused() {
     );
 }
 
+// A client's map and _NET_ACTIVE_WINDOW arrive before Xwayland supplies B's surface.
+// The compositor has already moved keyboard focus away from X, so only the explicit
+// request can get a token; creating B's role must not request another one.
+fn client_activation_before_role_creation(unmap_last_toplevel: bool) {
+    use super::model::{Compositor as FocusOwner, Role};
+    use testwl::ActivationEvent;
+
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let a = Window::new(1);
+    let (surface_a, id_a) = f.create_toplevel(&comp, a);
+    assert_eq!(f.connection().focused_window, Some(a));
+    f.testwl.unfocus_toplevel();
+    f.run();
+    assert_eq!(f.satellite.model.focus.compositor, FocusOwner::Other);
+    assert_eq!(f.connection().focused_window, None);
+    if unmap_last_toplevel {
+        f.satellite.unmap_window(a);
+        surface_a.obj.destroy();
+        f.run();
+    }
+    assert_eq!(
+        f.satellite.model.focus.last_toplevel,
+        (!unmap_last_toplevel).then_some(a)
+    );
+    assert!(f.testwl.take_activation_events().is_empty());
+    let serial = f.satellite.last_kb_serial.as_ref().unwrap().1;
+
+    let b = Window::new(2);
+    f.new_window(b, false, WindowData::default());
+    f.satellite.set_win_class(b, "activation-test".into());
+    f.satellite.map_window(b);
+    f.satellite.active_window_request(b);
+    let entity = f.satellite.windows[&b];
+    assert!(f.satellite.model.roles.classification(b).is_none());
+    assert!(f.satellite.world.get::<&WlSurface>(entity).is_err());
+    f.run();
+
+    let events = f.testwl.take_activation_events();
+    let [
+        ActivationEvent::TokenRequested,
+        ActivationEvent::TokenCommitted {
+            token,
+            serial: token_serial,
+            app_id,
+            surface,
+        },
+    ] = events.as_slice()
+    else {
+        panic!("expected a committed activation token before B has a surface: {events:?}");
+    };
+    assert_eq!(*token_serial, Some(serial));
+    assert_eq!(app_id.as_deref(), Some("activation-test"));
+    assert_eq!(*surface, (!unmap_last_toplevel).then_some(id_a));
+    // Read and dispatch the compositor's token-done event before inspecting the queue.
+    f.run();
+    assert_eq!(
+        f.satellite.world.pending_activations,
+        vec![(b, token.clone())]
+    );
+    f.run();
+    assert!(f.testwl.take_activation_events().is_empty());
+    assert_eq!(
+        f.satellite.world.pending_activations,
+        vec![(b, token.clone())]
+    );
+
+    let (_buffer, surface_b) = comp.create_surface();
+    f.associate_window(&comp, b, &surface_b.obj);
+    f.run();
+    let id_b = f.check_new_surface();
+    assert_ne!(id_a, id_b);
+    assert!(matches!(
+        f.satellite.model.roles.classification(b).map(|c| c.role),
+        Some(Role::Toplevel { .. })
+    ));
+    assert_eq!(
+        f.testwl.take_activation_events(),
+        vec![ActivationEvent::Activate {
+            token: token.clone(),
+            surface: id_b,
+        }]
+    );
+    assert!(f.satellite.world.pending_activations.is_empty());
+}
+
+#[test]
+fn client_activation_before_role_creation_uses_last_toplevel() {
+    client_activation_before_role_creation(false);
+}
+
+#[test]
+fn client_activation_before_role_creation_without_last_toplevel() {
+    client_activation_before_role_creation(true);
+}
+
+#[test]
+fn activation_token_without_serial_or_resolved_surface_still_asks() {
+    use super::model::{KbTarget, OutputId};
+    use testwl::ActivationEvent;
+
+    let (mut f, _comp) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    assert!(f.satellite.last_kb_serial.is_none());
+    for target in [
+        None,
+        Some(KbTarget::X(Window::new(99))),
+        Some(KbTarget::Overlay(OutputId(99))),
+    ] {
+        f.satellite.request_activation_token(window, target);
+    }
+    f.run();
+    let events = f.testwl.take_activation_events();
+    assert_eq!(
+        events.len(),
+        6,
+        "each request must reach the compositor: {events:?}"
+    );
+    for pair in events.chunks_exact(2) {
+        assert!(matches!(
+            pair,
+            [
+                ActivationEvent::TokenRequested,
+                ActivationEvent::TokenCommitted {
+                    serial: None,
+                    app_id: None,
+                    surface: None,
+                    ..
+                }
+            ]
+        ));
+    }
+}
+
 #[test]
 fn popup_window_changes_surface() {
     let (mut f, comp) = TestFixture::new_with_compositor();

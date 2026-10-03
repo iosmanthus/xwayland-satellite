@@ -310,8 +310,10 @@ pub enum Event {
     },
     /// Unmap, destroy, reparent away.
     Gone(x::Window),
-    /// `_NET_ACTIVE_WINDOW` (A1) or a new toplevel (M2).
+    /// The model's own activation of a new toplevel (M2).
     ActivationRequested(x::Window),
+    /// A client's `_NET_ACTIVE_WINDOW` for the window (rule 12; always asks the compositor).
+    ClientActivationRequested(x::Window),
     OverlayGone(OutputId),
     OutputChanged(x::Window, OutputId),
     BatchEnd,
@@ -342,10 +344,11 @@ pub enum Output {
     /// The Xwayland surface that holds the forwarded keyboard focus while the compositor's
     /// focus is on an overlay (§2.0 routing invariant); `None`: nothing.
     KeyboardRoute(Option<x::Window>),
-    /// Request an xdg-activation token for `window` from the compositor-focus surface.
+    /// Request an xdg-activation token for `window`, naming the compositor-focus surface
+    /// or the last focused toplevel; `None` requests a token without naming a surface.
     ActivationToken {
         window: x::Window,
-        surface: KbTarget,
+        surface: Option<KbTarget>,
     },
 }
 
