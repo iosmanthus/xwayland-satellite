@@ -2202,6 +2202,22 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                 assert!(data.xdg().last_configure_serial >= serial);
             }
             xdg_surface::Request::Destroy => {
+                // Upstream smithay's popup manager (`cleanup_and_get_alive`) posts this
+                // fatal error if an xdg_popup's parent is destroyed while it is still
+                // alive, for every parent kind (a toplevel or another popup), not only
+                // when the destroyed surface is itself a popup.
+                if let Some(child) = state.surfaces.iter().find_map(|(child_id, d)| {
+                    let Some(SurfaceRole::Popup(p)) = &d.role else {
+                        return None;
+                    };
+                    (p.parent.as_ref() == Some(resource) && p.popup.is_alive()).then_some(*child_id)
+                }) {
+                    panic!(
+                        "xdg_wm_base::NotTheTopmostPopup: {child:?}'s xdg_popup parent \
+                         ({surface_id:?}) was destroyed while {child:?} was still alive"
+                    );
+                }
+
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 let role_alive = data.role.is_none()
                     || match data.role.as_ref().unwrap() {

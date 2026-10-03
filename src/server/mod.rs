@@ -300,6 +300,16 @@ struct PopupData {
     xdg: XdgSurfaceData,
 }
 
+/// The X window a window's xdg_popup was literally made a child of (`create_popup`'s
+/// `parent`), as opposed to its classification's `Role::link()` (Family): an overlay
+/// popup's xdg_popup has no Wayland parent at all (it is a popup of its output's layer
+/// surface), even when its classification links it to a panel. Upstream smithay's popup
+/// manager posts `NotTheTopmostPopup` if this literal parent's xdg_popup is destroyed
+/// while this one is still alive, so every role-destroy site must destroy a window's
+/// tracked children first (deepest first) via [`InnerServerState::destroy_popup_children`].
+#[derive(Debug, Copy, Clone)]
+struct PopupXdgParent(x::Window);
+
 trait Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>);
 }
@@ -1532,9 +1542,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             win.mapped = false;
         }
 
+        self.destroy_popup_children(window);
         if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
             role.destroy();
         }
+        let _ = self.world.remove_one::<PopupXdgParent>(entity.unwrap());
         let _ = self.world.remove_one::<Classified>(entity.unwrap());
         let _ = self.world.remove_one::<overlay::Placement>(entity.unwrap());
         let _ = self
@@ -1668,10 +1680,44 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
     pub fn destroy_window(&mut self, window: x::Window) {
         self.feed(RawEvent::Destroy { window });
+        self.destroy_popup_children(window);
         if let Some(id) = self.windows.remove(&window) {
             self.world.remove::<(x::Window, WindowData)>(id).unwrap();
             if self.world.entity(id).unwrap().is_empty() {
                 self.world.despawn(id).unwrap();
+            }
+        }
+    }
+
+    /// Windows whose xdg_popup was literally made a child of `parent`'s surface (see
+    /// [`PopupXdgParent`]).
+    fn popup_children(&self, parent: x::Window) -> Vec<x::Window> {
+        self.windows
+            .iter()
+            .filter(|&(_, &entity)| {
+                self.world
+                    .get::<&PopupXdgParent>(entity)
+                    .is_ok_and(|p| p.0 == parent)
+            })
+            .map(|(&window, _)| window)
+            .collect()
+    }
+
+    /// Destroys the roles of every window whose xdg_popup is literally a child of
+    /// `window`'s surface, deepest first. Upstream smithay's popup manager posts a fatal
+    /// `NotTheTopmostPopup` protocol error if an xdg_popup is destroyed while a child
+    /// popup of it is still alive (#494's popup-of-popup nesting is new with the window
+    /// model); every site that destroys a role must call this first, for every parent
+    /// kind, not only popups. A child destroyed this way stays X-mapped with no Wayland
+    /// role until its client unmaps it; it is not recreated under another parent.
+    fn destroy_popup_children(&mut self, window: x::Window) {
+        for child in self.popup_children(window) {
+            self.destroy_popup_children(child);
+            if let Some(entity) = self.windows.get(&child).copied() {
+                if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity) {
+                    role.destroy();
+                }
+                let _ = self.world.remove_one::<PopupXdgParent>(entity);
             }
         }
     }
@@ -1758,15 +1804,22 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             Role::Popup { parent } | Role::PanelOf { parent } => Some(Err(parent)),
             Role::Toplevel { .. } | Role::FullscreenToplevel { .. } => None,
         };
+        // The literal xdg_popup parent `create_popup` gave this role, if any: unlike
+        // `classification.role.link()` (Family), an overlay popup's xdg_popup has no
+        // Wayland parent at all (see `PopupXdgParent`).
+        let mut literal_xdg_parent = None;
         let (role, is_toplevel) = match placement {
             Some(Ok(output)) => (
                 SurfaceRole::Popup(Some(self.create_overlay_popup(entity, xdg_surface, output))),
                 false,
             ),
-            Some(Err(parent)) => (
-                SurfaceRole::Popup(Some(self.create_popup(entity, xdg_surface, parent))),
-                false,
-            ),
+            Some(Err(parent)) => {
+                literal_xdg_parent = Some(parent);
+                (
+                    SurfaceRole::Popup(Some(self.create_popup(entity, xdg_surface, parent))),
+                    false,
+                )
+            }
             None => {
                 let (fullscreen, fixed, parent) = match classification.role {
                     Role::FullscreenToplevel { parent, fixed_size } => (true, fixed_size, parent),
@@ -1813,6 +1866,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
         client.commit();
         self.world.insert(entity, (role, Classified(made))).unwrap();
+        if let Some(parent) = literal_xdg_parent {
+            self.world
+                .insert_one(entity, PopupXdgParent(parent))
+                .unwrap();
+        }
         trace_line!(trace_codec::role_line(
             self.now_ms(),
             window,

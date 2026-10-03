@@ -2291,6 +2291,239 @@ fn panel_over_meeting(
     (main, main_id, meeting, panel, panel_surface)
 }
 
+/// `panel_over_meeting`, plus an override-redirect popup (Feishu's combo bubble) that
+/// maps while the panel is open: rule 11 makes it a popup of the panel
+/// (`Role::OverlayPopupOf`). The panel here is a `PanelOf` (an xdg_popup of the meeting
+/// toplevel, not an `OverlayWindow`), so the bubble is a literal xdg_popup child of the
+/// panel's own xdg_surface, not a sibling on an overlay's layer surface.
+fn panel_with_a_popup_child(
+    f: &mut TestFixture<FakeXConnection>,
+    comp: &Compositor,
+) -> (
+    Window,
+    Window,
+    Window,
+    TestObject<WlSurface>,
+    testwl::SurfaceId,
+    testwl::SurfaceId,
+) {
+    let (_main, _main_id, meeting, panel, panel_surface) = panel_over_meeting(f, comp);
+    let panel_id = f.testwl.last_created_surface_id().unwrap();
+
+    let bubble = Window::new(4);
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 1700,
+            y: 1800,
+            width: 120,
+            height: 40,
+        },
+        fullscreen: false,
+    };
+    f.new_window(bubble, true, data);
+    f.map_window(comp, bubble, &surface.obj, &buffer);
+    f.run();
+    let bubble_id = f.check_new_surface();
+    f.testwl.configure_popup(bubble_id);
+    f.run();
+    f.run();
+
+    let panel_xdg_id = f
+        .testwl
+        .get_surface_data(panel_id)
+        .unwrap()
+        .xdg()
+        .surface
+        .id();
+    let bubble_data = f.testwl.get_surface_data(bubble_id).unwrap();
+    assert_eq!(
+        bubble_data.popup().parent.as_ref().map(|p| p.id()),
+        Some(panel_xdg_id),
+        "the bubble should be a literal xdg_popup child of the panel (rule 11)"
+    );
+    assert!(bubble_data.popup().popup.is_alive());
+
+    (meeting, panel, bubble, panel_surface, panel_id, bubble_id)
+}
+
+// HF1: niri's smithay posts a fatal `NotTheTopmostPopup` protocol error if an
+// xdg_popup is destroyed while a popup nested inside it (rule 11's popup-of-popup) is
+// still alive. Unmapping the panel used to destroy the panel's xdg_popup first,
+// killing the connection (and with it Feishu and WeChat); the child must go first.
+#[test]
+fn panel_unmapped_with_a_child_popup_destroys_the_child_first() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (meeting, panel, _bubble, _panel_surface, _panel_id, bubble_id) =
+        panel_with_a_popup_child(&mut f, &comp);
+
+    f.satellite.unmap_window(panel);
+    f.run();
+    f.run();
+
+    assert!(
+        !f.testwl
+            .get_surface_data(bubble_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive(),
+        "the bubble's popup role should have been destroyed with its parent"
+    );
+    // Rule 9: the panel's X focus is restored to the window the compositor remembered.
+    assert_eq!(f.connection().focused_window, Some(meeting));
+}
+
+// Same crash, triggered by destroying the panel's X window outright instead of
+// unmapping it first (e.g. the client closing it without an intervening unmap).
+#[test]
+fn panel_destroyed_with_a_child_popup_destroys_the_child_first() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (meeting, panel, _bubble, panel_surface, _panel_id, bubble_id) =
+        panel_with_a_popup_child(&mut f, &comp);
+
+    // Xwayland destroys the panel's wl_surface as it destroys the X window (see
+    // `route_target_gone_while_on_overlay` for the same pairing).
+    panel_surface.obj.destroy();
+    f.satellite.destroy_window(panel);
+    f.run();
+    f.run();
+
+    assert!(
+        !f.testwl
+            .get_surface_data(bubble_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive(),
+        "the bubble's popup role should have been destroyed with its parent"
+    );
+    assert_eq!(f.connection().focused_window, Some(meeting));
+}
+
+// `move_overlay_popup` (overlay.rs) destroys and remakes a re-homed overlay window's
+// own xdg_popup; a literal popup child of it (unlike an override-redirect
+// `OverlayPopupOf`, which sits on the overlay's layer surface as a sibling, not nested)
+// must still be destroyed first.
+#[test]
+fn overlay_panel_rehomed_with_a_popup_child_destroys_it_first() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_main, _main_id, _overlay, _bar, _bar_surface, panel, _panel_surface) =
+        panel_over_bar(&mut f, &comp);
+    let panel_id = f.testwl.last_created_surface_id().unwrap();
+    new_overlay_output(&mut f, 1920, 0);
+
+    // A same-client, non-override-redirect popup of the panel (e.g. a menu): rule 11
+    // places it as `Role::Popup { parent: panel }`, a literal xdg_popup child of the
+    // panel's own xdg_surface.
+    let child = Window::new(4);
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 1620,
+            y: 1780,
+            width: 60,
+            height: 40,
+        },
+        fullscreen: false,
+    };
+    f.new_window(child, false, data);
+    f.satellite
+        .set_window_role(child, crate::xstate::WindowRole::Popup);
+    f.map_window(&comp, child, &surface.obj, &buffer);
+    f.run();
+    let child_id = f.check_new_surface();
+    f.testwl.configure_popup(child_id);
+    f.run();
+    f.run();
+
+    let panel_xdg_id = f
+        .testwl
+        .get_surface_data(panel_id)
+        .unwrap()
+        .xdg()
+        .surface
+        .id();
+    let child_data = f.testwl.get_surface_data(child_id).unwrap();
+    assert_eq!(
+        child_data.popup().parent.as_ref().map(|p| p.id()),
+        Some(panel_xdg_id)
+    );
+    assert!(child_data.popup().popup.is_alive());
+
+    // Moves the panel's X window so its centre lands under the second output's overlay.
+    f.reconfigure_window(
+        panel,
+        WindowDims {
+            x: 5440,
+            y: 1760,
+            width: 904,
+            height: 256,
+        },
+        false,
+    );
+    f.run();
+    f.run();
+
+    assert!(
+        !f.testwl
+            .get_surface_data(child_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive(),
+        "the child's popup role should have been destroyed before re-homing the panel"
+    );
+}
+
+// A child whose role was destroyed ahead of its parent's stays X-mapped with no
+// Wayland role until its own client unmaps it; further events for it (a ConfigureNotify,
+// then its own unmap) must not touch the dead role or panic.
+#[test]
+fn orphaned_popup_child_survives_reconfigure_and_unmap() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (_meeting, panel, bubble, _panel_surface, _panel_id, bubble_id) =
+        panel_with_a_popup_child(&mut f, &comp);
+
+    f.satellite.unmap_window(panel);
+    f.run();
+    f.run();
+    assert!(
+        !f.testwl
+            .get_surface_data(bubble_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive()
+    );
+
+    f.reconfigure_window(
+        bubble,
+        WindowDims {
+            x: 1750,
+            y: 1850,
+            width: 120,
+            height: 40,
+        },
+        true,
+    );
+    f.run();
+    f.run();
+
+    f.satellite.unmap_window(bubble);
+    f.run();
+    f.run();
+}
+
 // Feishu closes a meeting panel the moment it loses focus. When the compositor
 // moves keyboard focus to another X window only because the pointer went over it
 // (focus follows the mouse, as niri can do), the panel keeps X focus; a click in

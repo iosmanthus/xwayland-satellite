@@ -172,6 +172,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     /// Makes an overlay popup again on `output`'s overlay.
     pub(super) fn move_overlay_popup(&mut self, entity: Entity, output: Entity) {
         debug!("moving overlay popup {entity:?} to output {output:?}");
+        let window = *self.world.get::<&x::Window>(entity).unwrap();
+        self.destroy_popup_children(window);
         if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity) {
             role.destroy();
         }
@@ -203,7 +205,6 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             .insert_one(entity, SurfaceRole::Popup(Some(popup)))
             .unwrap();
 
-        let window = *self.world.get::<&x::Window>(entity).unwrap();
         let output = OutputId(self.world.get::<&GlobalName>(output).unwrap().0);
         self.feed(RawEvent::OverlayRehome { window, output });
         #[cfg(feature = "trace")]
