@@ -2,6 +2,7 @@ mod settings;
 use settings::Settings;
 mod selection;
 use selection::{Selection, SelectionState};
+mod root_cursor;
 #[cfg(test)]
 mod tests;
 mod xresources;
@@ -113,6 +114,11 @@ pub struct XState {
     settings: Settings,
     /// The logical cursor size, which X clients get scaled in `Xcursor.size`.
     cursor_size: u32,
+    /// What `set_root_cursor` builds the root cursor from.
+    root_cursor_source: Option<root_cursor::RootCursorSource>,
+    /// The root cursor `set_root_cursor` created and its image size; freed when
+    /// replaced.
+    root_cursor: Option<(x::Cursor, u32)>,
     max_req_bytes: usize,
 }
 
@@ -127,6 +133,7 @@ impl XState {
                     xcb::Extension::RandR,
                     xcb::Extension::XFixes,
                     xcb::Extension::Res,
+                    xcb::Extension::Render,
                 ],
                 &[],
             )
@@ -225,6 +232,7 @@ impl XState {
         // Additionally, requests use 32 bytes of metadata which cannot store arbitrary data
         let max_req_bytes = (connection.get_maximum_request_length() * 4 - 32) as usize;
 
+        let root_cursor_source = root_cursor::RootCursorSource::load(&connection);
         let mut r = Self {
             connection,
             wm_window,
@@ -234,6 +242,8 @@ impl XState {
             selection_state,
             settings,
             cursor_size: xresources::logical_cursor_size(),
+            root_cursor_source,
+            root_cursor: None,
             max_req_bytes,
         };
         r.create_ewmh_window();

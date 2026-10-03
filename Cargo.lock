@@ -1292,6 +1292,7 @@ dependencies = [
  "wl_drm",
  "xcb",
  "xcb-util-cursor",
+ "xcursor",
 ]
 
 [[package]]

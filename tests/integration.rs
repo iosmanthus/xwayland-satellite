@@ -2271,6 +2271,56 @@ fn resource_manager_scale() {
     );
 }
 
+/// The root window's cursor, which an X window without a cursor of its own shows,
+/// follows the scale X clients render at like `Xcursor.size` does: satellite shows
+/// every X cursor at its logical size, so a root cursor left at the logical size
+/// would come out at a fraction of the others. Needs a cursor theme with left_ptr
+/// (XCURSOR_THEME, else "default"); skipped without one.
+#[test]
+fn root_cursor_follows_the_scale() {
+    let theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".to_owned());
+    let Some(images) = xcursor::CursorTheme::load(&theme)
+        .load_icon("left_ptr")
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|content| xcursor::parser::parse_xcursor(&content))
+    else {
+        eprintln!("no left_ptr in cursor theme {theme:?}, skipping");
+        return;
+    };
+    let image_size = |size: f64| {
+        let image = images
+            .iter()
+            .min_by_key(|image| image.size.abs_diff(size.round() as u32))
+            .unwrap();
+        (image.width as u16, image.height as u16)
+    };
+
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let mut connection = Connection::new(&f.display);
+    f.testwl.enable_xdg_output_manager();
+    let output = f.create_output(0, 0);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+    f.testwl.move_surface_to_output(surface, &output);
+    f.wait_and_dispatch();
+    let cursor = connection.get_reply(&xcb::xfixes::GetCursorImage {});
+    assert_eq!(
+        (cursor.width(), cursor.height()),
+        image_size(logical_cursor_size())
+    );
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    data.fractional.as_ref().unwrap().preferred_scale(240); // 2x
+    f.wait_and_dispatch();
+    let cursor = connection.get_reply(&xcb::xfixes::GetCursorImage {});
+    assert_eq!(
+        (cursor.width(), cursor.height()),
+        image_size(logical_cursor_size() * 2.0)
+    );
+}
+
 #[test]
 fn xsettings_switch_owner() {
     let f = Fixture::new();
