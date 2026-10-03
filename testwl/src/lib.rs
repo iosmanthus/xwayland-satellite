@@ -731,6 +731,16 @@ impl Server {
     }
 
     #[track_caller]
+    pub fn keyboard(&self) -> &WlKeyboard {
+        &self
+            .state
+            .keyboard
+            .as_ref()
+            .expect("Keyboard should be created")
+            .keyboard
+    }
+
+    #[track_caller]
     pub fn locked_pointer(&self) -> Option<&LockedPointer> {
         self.state.pointer.as_ref().unwrap().locked.as_ref()
     }

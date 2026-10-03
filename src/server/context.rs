@@ -3,9 +3,6 @@
 //! raw events into classify requests and focus events. The event layer, the scenario
 //! runner and trace replay all go through `Model::feed`.
 
-// Wired into the event layer in T5; T5c removes this.
-#![allow(dead_code)]
-
 use super::classify::classify;
 use super::focus::MAX_LINKS;
 use super::model::{

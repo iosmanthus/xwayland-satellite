@@ -4731,3 +4731,514 @@ fn size_hints_scaled_at_creation() {
     assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 800, y: 645 }));
     assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 1600, y: 1000 }));
 }
+
+/// A meeting window focused, a bar and an overlay panel transient for it on output 0's
+/// overlay; the compositor's focus on the main window. Returns (main, main_id, overlay,
+/// bar, bar_surface, panel, panel_surface).
+#[allow(clippy::type_complexity)]
+fn panel_over_bar(
+    f: &mut TestFixture<FakeXConnection>,
+    comp: &Compositor,
+) -> (
+    Window,
+    testwl::SurfaceId,
+    testwl::SurfaceId,
+    Window,
+    wayland_server::protocol::wl_surface::WlSurface,
+    Window,
+    TestObject<WlSurface>,
+) {
+    let (_, overlay) = new_overlay_output(f, 0, 0);
+    let main = Window::new(1);
+    let (_, main_id) = f.create_toplevel(comp, main);
+    let bar = Window::new(2);
+    let bar_id = new_notification(
+        f,
+        comp,
+        bar,
+        WindowDims {
+            x: 1650,
+            y: 2020,
+            width: 538,
+            height: 56,
+        },
+    );
+    f.testwl.configure_popup(bar_id);
+    f.run();
+    f.run();
+    let bar_surface = f.testwl.get_surface_data(bar_id).unwrap().surface.clone();
+    let panel = Window::new(3);
+    let (panel_surface, _) = new_panel(f, comp, panel, bar);
+    assert_eq!(f.connection().focused_window, Some(panel));
+    (
+        main,
+        main_id,
+        overlay,
+        bar,
+        bar_surface,
+        panel,
+        panel_surface,
+    )
+}
+
+fn keyboard_and_pointer(comp: &Compositor) -> (TestObject<WlKeyboard>, TestObject<WlPointer>) {
+    (
+        TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {}),
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {}),
+    )
+}
+
+// A click on a bar the compositor never gave the overlay's keyboard focus for does not
+// linger: focus following the mouse onto the overlay later focuses nothing new (smell #4).
+#[test]
+fn overlay_press_does_not_linger() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_keyboard, _pointer) = keyboard_and_pointer(&comp);
+    let (_, overlay) = new_overlay_output(&mut f, 0, 0);
+    let main = Window::new(1);
+    let (_, main_id) = f.create_toplevel(&comp, main);
+    let meeting = Window::new(2);
+    f.create_toplevel(&comp, meeting);
+    let bar = Window::new(3);
+    let bar_id = new_notification(
+        &mut f,
+        &comp,
+        bar,
+        WindowDims {
+            x: 1650,
+            y: 2020,
+            width: 538,
+            height: 56,
+        },
+    );
+    f.testwl.configure_popup(bar_id);
+    f.run();
+    f.run();
+    let bar_surface = f.testwl.get_surface_data(bar_id).unwrap().surface.clone();
+    click(&mut f, &bar_surface);
+    f.testwl.focus_toplevel(main_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(main));
+    f.testwl.focus_toplevel(overlay);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(main));
+}
+
+// A click on an override-redirect window on the overlay (an input method's candidates)
+// is never a press waiting for the overlay's focus: X focus stays on the panel (#5, #494).
+#[test]
+fn press_on_override_redirect_overlay_window_is_never_pending() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_keyboard, _pointer) = keyboard_and_pointer(&comp);
+    let (_, _, overlay, _, _, panel, _) = panel_over_bar(&mut f, &comp);
+    let candidates = Window::new(4);
+    let (buffer, surface) = comp.create_surface();
+    f.new_window(
+        candidates,
+        true,
+        WindowData {
+            mapped: true,
+            dims: WindowDims {
+                x: 1640,
+                y: 1860,
+                width: 180,
+                height: 560,
+            },
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, candidates, &surface.obj, &buffer);
+    f.run();
+    let id = f.check_new_surface();
+    f.testwl.configure_popup(id);
+    f.run();
+    let candidates_surface = f.testwl.get_surface_data(id).unwrap().surface.clone();
+    click(&mut f, &candidates_surface);
+    f.testwl.focus_toplevel(overlay);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+}
+
+// The window the compositor focused while the panel held X focus goes away before the
+// panel does: closing the panel does not focus a window that is gone (smell #10).
+#[test]
+fn remembered_window_gone_before_the_panel() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_keyboard, _pointer) = keyboard_and_pointer(&comp);
+    new_overlay_output(&mut f, 0, 0);
+    let (main, main_id, meeting, panel, _) = panel_over_meeting(&mut f, &comp);
+    f.testwl.focus_toplevel(main_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(panel));
+    f.satellite.unmap_window(main);
+    f.run();
+    f.satellite.unmap_window(panel);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(meeting));
+}
+
+// A window mapped again after being an overlay window keeps nothing of it (smells #6/#7).
+#[test]
+fn remapped_overlay_window_loses_its_overlay_parts() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let window = Window::new(1);
+    let (first_buffer, first_surface) = comp.create_surface();
+    f.new_window(
+        window,
+        false,
+        WindowData {
+            mapped: false,
+            dims: WindowDims {
+                x: 1650,
+                y: 2020,
+                width: 538,
+                height: 56,
+            },
+            fullscreen: false,
+        },
+    );
+    f.satellite
+        .set_window_types(window, vec![crate::server::model::NetWmType::Notification]);
+    f.map_window(&comp, window, &first_surface.obj, &first_buffer);
+    f.run();
+    let id = f.check_new_surface();
+    f.testwl.configure_popup(id);
+    f.run();
+    assert!(f.satellite.can_change_position(window));
+    f.satellite.set_size_hints(
+        window,
+        crate::xstate::WmNormalHints {
+            min_size: Some(WinSize {
+                width: 562,
+                height: 56,
+            }),
+            max_size: None,
+            position: true,
+        },
+    );
+    f.satellite.set_win_class(window, "Meeting".into());
+    f.satellite.unmap_window(window);
+    // The client retires its old surface before mapping a new one, same as any other
+    // remap (see popup_window_changes_surface): otherwise the new one is never
+    // associated with `window` (xstate matches by serial on a surface-less entity).
+    first_surface.obj.destroy();
+    f.run();
+    // Mapped again with neither WM_NORMAL_HINTS nor WM_CLASS: xstate starts the map's facts
+    // afresh and finds none (review r1 I1).
+    f.satellite.begin_map_facts(window);
+    f.satellite
+        .set_window_types(window, vec![crate::server::model::NetWmType::Normal]);
+    let (buffer, surface) = comp.create_surface();
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+    let id = f.check_new_surface();
+    let entity = f.satellite.windows[&window];
+    assert!(matches!(
+        f.testwl.get_surface_data(id).unwrap().role,
+        Some(SurfaceRole::Toplevel(_))
+    ));
+    assert!(
+        !f.satellite
+            .world
+            .satisfies::<&super::overlay::Placement>(entity)
+            .unwrap()
+    );
+    assert!(
+        !f.satellite
+            .world
+            .satisfies::<&super::overlay::OverlayParent>(entity)
+            .unwrap()
+    );
+    assert!(!f.satellite.can_change_position(window));
+    let facts = f.satellite.window_facts(window).unwrap();
+    assert_eq!((facts.size_hints, facts.class), (None, None));
+}
+
+// Documents a kept limitation (design §2.0): when the compositor's leave and enter come
+// in two reads, the panel is lost.
+#[test]
+fn panel_lost_when_leave_and_enter_come_apart() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_keyboard, _pointer) = keyboard_and_pointer(&comp);
+    new_overlay_output(&mut f, 0, 0);
+    let (main, main_id, _, _, _) = panel_over_meeting(&mut f, &comp);
+    f.testwl.unfocus_toplevel();
+    f.run();
+    assert_eq!(f.connection().focused_window, None);
+    f.testwl.focus_toplevel(main_id);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(main));
+}
+
+// An output going away takes its overlay windows to another output's overlay, and the
+// client's window stays mapped (O2/O3, smell #18, Q18).
+#[test]
+fn overlay_windows_move_when_their_output_goes() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (output1, _) = new_overlay_output(&mut f, 0, 0);
+    let (output2, overlay2) = new_overlay_output(&mut f, 1920, 0);
+    let main = Window::new(1);
+    let (_, main_id) = f.create_toplevel(&comp, main);
+    f.testwl.move_surface_to_output(main_id, &output2);
+    f.run();
+    f.run();
+    let bar = Window::new(2);
+    let bar_id = new_notification(
+        &mut f,
+        &comp,
+        bar,
+        WindowDims {
+            x: 1650,
+            y: 2020,
+            width: 538,
+            height: 56,
+        },
+    );
+    f.testwl.configure_popup(bar_id);
+    f.run();
+    f.remove_output(output1);
+    f.run();
+    f.run();
+    let popup = f.testwl.get_surface_data(bar_id).unwrap().popup();
+    assert_eq!(popup.layer_parent, Some(overlay2));
+}
+
+// A wl_surface.enter on another output does not move an overlay window in X: where it is
+// is its client's to say (smell #17, Q18).
+#[test]
+fn overlay_window_stays_where_its_client_put_it() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (output2, _) = new_overlay_output(&mut f, 1920, 0);
+    let bar = Window::new(1);
+    let bar_id = new_notification(
+        &mut f,
+        &comp,
+        bar,
+        WindowDims {
+            x: 1650,
+            y: 2020,
+            width: 538,
+            height: 56,
+        },
+    );
+    f.testwl.configure_popup(bar_id);
+    f.run();
+    f.run();
+    let before = f.connection().window(bar).dims;
+    let counter = f.connection().set_window_dims_counter;
+    f.testwl.move_surface_to_output(bar_id, &output2);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().window(bar).dims, before);
+    assert_eq!(f.connection().set_window_dims_counter, counter);
+}
+
+// An input method's candidates over a panel shown as a popup of the meeting window go
+// over that panel, placed from it, not at the screen's corner (smell #3).
+#[test]
+fn input_method_window_over_a_panel_of_a_toplevel() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let meeting = Window::new(1);
+    f.create_toplevel(&comp, meeting);
+    let panel = Window::new(2);
+    let (_, panel_id) = new_panel(&mut f, &comp, panel, meeting);
+    let candidates = Window::new(3);
+    let (buffer, surface) = comp.create_surface();
+    f.new_window(
+        candidates,
+        true,
+        WindowData {
+            mapped: true,
+            dims: WindowDims {
+                x: 1640,
+                y: 1860,
+                width: 180,
+                height: 560,
+            },
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, candidates, &surface.obj, &buffer);
+    f.run();
+    let id = f.check_new_surface();
+    let popup = f.testwl.get_surface_data(id).unwrap().popup();
+    let panel_xdg = &f.testwl.get_surface_data(panel_id).unwrap().xdg().surface;
+    assert_eq!(popup.layer_parent, None);
+    assert_eq!(popup.parent.as_ref().map(|p| p.id()), Some(panel_xdg.id()));
+    let scale = f.satellite.current_scale;
+    assert_eq!(
+        popup.positioner_state.offset,
+        testwl::Vec2 {
+            x: ((1640 - 1600) as f64 / scale) as i32,
+            y: ((1860 - 1760) as f64 / scale) as i32,
+        }
+    );
+}
+
+// Keys given through the overlay: the enter uses the compositor's serial, the modifiers
+// held are sent again with it, and a re-route lists the keys held at that moment (§2.0).
+#[test]
+fn keys_through_the_overlay_carry_modifiers_serial_and_held_keys() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (keyboard, _pointer) = keyboard_and_pointer(&comp);
+    let (_, _, overlay, bar, _, _, panel_surface) = panel_over_bar(&mut f, &comp);
+    f.testwl.keyboard().modifiers(500, 1, 0, 0, 0);
+    // The raw keyboard object does not flush on its own (unlike testwl's `focus_toplevel`
+    // and friends): three runs settle it before the scenario below.
+    f.run();
+    f.run();
+    f.run();
+    std::mem::take(&mut *keyboard.data.events.lock().unwrap());
+    f.testwl.focus_toplevel(overlay);
+    f.run();
+    f.run();
+    let events = std::mem::take(&mut *keyboard.data.events.lock().unwrap());
+    let enter = events.iter().find_map(|e| match e {
+        wl_keyboard::Event::Enter {
+            serial, surface, ..
+        } => Some((*serial, surface.id())),
+        _ => None,
+    });
+    let modifiers = events.iter().find_map(|e| match e {
+        wl_keyboard::Event::Modifiers {
+            serial,
+            mods_depressed,
+            ..
+        } => Some((*serial, *mods_depressed)),
+        _ => None,
+    });
+    let (enter_serial, entered) = enter.expect("no enter on the panel");
+    assert_eq!(entered, panel_surface.obj.id());
+    assert_eq!(modifiers, Some((enter_serial, 1)));
+
+    // A re-route enters the new panel with the keys held now (review r1 I2): one held...
+    let entered_keys = || {
+        std::mem::take(&mut *keyboard.data.events.lock().unwrap())
+            .into_iter()
+            .find_map(|e| match e {
+                wl_keyboard::Event::Enter { keys, .. } => Some(keys),
+                _ => None,
+            })
+            .expect("no enter after the re-route")
+    };
+    use s_proto::wl_keyboard::KeyState;
+    f.testwl.keyboard().key(501, 0, 30, KeyState::Pressed);
+    f.run();
+    std::mem::take(&mut *keyboard.data.events.lock().unwrap());
+    new_panel(&mut f, &comp, Window::new(10), bar);
+    assert_eq!(entered_keys(), 30u32.to_ne_bytes().to_vec());
+    // ...then none once it is released.
+    f.testwl.keyboard().key(502, 0, 30, KeyState::Released);
+    f.run();
+    std::mem::take(&mut *keyboard.data.events.lock().unwrap());
+    new_panel(&mut f, &comp, Window::new(11), bar);
+    assert_eq!(entered_keys(), Vec::<u8>::new());
+}
+
+// A click on a bar of the overlay the compositor already focused takes X focus at once:
+// niri sends no keyboard event for it (design rule 7).
+#[test]
+fn click_on_a_bar_of_the_focused_overlay() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_keyboard, _pointer) = keyboard_and_pointer(&comp);
+    let (_, overlay) = new_overlay_output(&mut f, 0, 0);
+    let main = Window::new(1);
+    f.create_toplevel(&comp, main);
+    let bar = Window::new(2);
+    let bar_id = new_notification(
+        &mut f,
+        &comp,
+        bar,
+        WindowDims {
+            x: 1650,
+            y: 2020,
+            width: 538,
+            height: 56,
+        },
+    );
+    f.testwl.configure_popup(bar_id);
+    f.run();
+    f.run();
+    f.testwl.focus_toplevel(overlay);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(main));
+    let bar_surface = f.testwl.get_surface_data(bar_id).unwrap().surface.clone();
+    click(&mut f, &bar_surface);
+    assert_eq!(f.connection().focused_window, Some(bar));
+}
+
+// A bar's click waits for its own output's overlay, not another's (design rule 7).
+#[test]
+fn bar_press_waits_for_its_own_overlay() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (_keyboard, _pointer) = keyboard_and_pointer(&comp);
+    new_overlay_output(&mut f, 0, 0);
+    let (_, overlay2) = new_overlay_output(&mut f, 1920, 0);
+    let main = Window::new(1);
+    f.create_toplevel(&comp, main);
+    let bar = Window::new(2);
+    let bar_id = new_notification(
+        &mut f,
+        &comp,
+        bar,
+        WindowDims {
+            x: 1650,
+            y: 2020,
+            width: 538,
+            height: 56,
+        },
+    );
+    f.testwl.configure_popup(bar_id);
+    f.run();
+    f.run();
+    let bar_surface = f.testwl.get_surface_data(bar_id).unwrap().surface.clone();
+    click(&mut f, &bar_surface);
+    f.testwl.focus_toplevel(overlay2);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(main));
+}
+
+// Review Focus 5: the window keys are routed to goes away while the compositor stays on
+// the overlay; no keyboard event goes to its dead surface, keys go where X focus goes.
+#[test]
+fn route_target_gone_while_on_overlay() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let (keyboard, _pointer) = keyboard_and_pointer(&comp);
+    let (main, _, overlay, _, _, panel, panel_surface) = panel_over_bar(&mut f, &comp);
+    f.testwl.focus_toplevel(overlay);
+    f.run();
+    f.run();
+    std::mem::take(&mut *keyboard.data.events.lock().unwrap());
+    panel_surface.obj.destroy();
+    f.satellite.unmap_window(panel);
+    f.run();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(main));
+    let entered = std::mem::take(&mut *keyboard.data.events.lock().unwrap())
+        .into_iter()
+        .any(|e| matches!(e, wl_keyboard::Event::Enter { .. }));
+    assert!(entered, "keys follow X focus to the main window");
+}

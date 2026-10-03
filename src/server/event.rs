@@ -224,7 +224,13 @@ impl SurfaceEvents {
                         dimensions.y,
                         state.current_scale,
                     );
-                    win_data.update_output_offset(*window, WindowOutputOffset { x, y }, connection);
+                    if !overlay::is_overlay_window(data) {
+                        win_data.update_output_offset(
+                            *window,
+                            WindowOutputOffset { x, y },
+                            connection,
+                        );
+                    }
 
                     if state.fractional_scale.is_none() {
                         let output_scale = output_data.get::<&OutputScaleFactor>().unwrap().get();
@@ -474,8 +480,12 @@ impl SurfaceEvents {
             xdg_popup::Event::Repositioned { .. } => {}
             xdg_popup::Event::PopupDone => {
                 let window = *data.get::<&x::Window>().unwrap();
-                state.inner.feed(RawEvent::PopupDone { window });
-                state.connection.unmap_window(window);
+                if overlay::is_overlay_window(data) {
+                    debug!("overlay window {window:?}'s overlay went away");
+                } else {
+                    state.inner.feed(RawEvent::PopupDone { window });
+                    state.connection.unmap_window(window);
+                }
             }
             other => todo!("{other:?}"),
         }

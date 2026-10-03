@@ -938,6 +938,36 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                     output: OutputId(global.0),
                 });
                 self.updated_outputs.push(*entity);
+                // Its overlay windows go to the overlay now under them, else to that of the
+                // output the user was last in; else they are left (and their popup_done is
+                // ignored, below). `move_overlay_popup` tells the model (OverlayRehome).
+                let gone = *entity;
+                let moving: Vec<(Entity, WindowDims)> = self
+                    .world
+                    .query::<(&overlay::OverlayParent, &WindowData)>()
+                    .iter()
+                    .filter(|(_, (parent, _))| parent.0 == gone)
+                    .map(|(e, (_, data))| (e, data.attrs.dims))
+                    .collect();
+                for (surface, dims) in moving {
+                    // The model's own fallback (Q4), so classify and this agree.
+                    let fallback = context::fallback_overlay(&self.model.roles, &self.model.focus)
+                        .and_then(|o| self.output_entity(o))
+                        .filter(|&o| {
+                            o != gone
+                                && self
+                                    .world
+                                    .get::<&overlay::Overlay>(o)
+                                    .is_ok_and(|overlay| overlay.mapped)
+                        });
+                    let target = self
+                        .overlay_output_under(dims)
+                        .filter(|&o| o != gone)
+                        .or(fallback);
+                    if let Some(target) = target {
+                        self.move_overlay_popup(surface, target);
+                    }
+                }
                 self.remove_overlay(*entity);
                 self.world
                     .remove::<(OutputScaleFactor, OutputDimensions)>(*entity)
@@ -1504,6 +1534,13 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             role.destroy();
         }
         let _ = self.world.remove_one::<Classified>(entity.unwrap());
+        let _ = self.world.remove_one::<overlay::Placement>(entity.unwrap());
+        let _ = self
+            .world
+            .remove_one::<overlay::OverlayParent>(entity.unwrap());
+        let _ = self
+            .world
+            .remove_one::<overlay::LastBuffer>(entity.unwrap());
 
         self.feed(RawEvent::Unmap { window });
     }

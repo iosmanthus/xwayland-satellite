@@ -2,9 +2,6 @@
 //! the fork's own arms re-walked over the window types, then where the window goes and
 //! what it does to focus when shown.
 
-// Wired into the event layer in T5; T5c removes this.
-#![allow(dead_code)]
-
 use super::model::{
     Classification, ClassifyContext, FocusOnMap, InputHint, NetWmType, ParentRole, Role,
     WindowFacts, XKind,

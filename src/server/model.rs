@@ -4,9 +4,6 @@
 //! feeds through one pipeline, [`Model::feed`]. Plain data: the rules live in `classify`,
 //! `focus` and `context`. Trace and fixture schemas: docs/window-model/.
 
-// Wired into the event layer in T5; T5c removes this.
-#![allow(dead_code)]
-
 use crate::xstate::{WindowDims, WindowRole};
 use std::collections::{BTreeMap, HashMap};
 use xcb::x;

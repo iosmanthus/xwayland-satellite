@@ -3,9 +3,6 @@
 //! the event layer feeds it events and executes its outputs (`XFocus` at `BatchEnd`,
 //! the rest at once).
 
-// Wired into the event layer in T5; T5c removes this.
-#![allow(dead_code)]
-
 use super::model::{
     Compositor, Event, FocusOnMap, FocusState, InputHint, KbTarget, Method, Output, OutputId,
     PressTarget, Role, RoleTable, XFocusChange,

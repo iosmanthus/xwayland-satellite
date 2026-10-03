@@ -145,7 +145,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     /// The output under the centre of a window at `dims`, if it has a mapped overlay.
-    fn overlay_output_under(&self, dims: WindowDims) -> Option<Entity> {
+    pub(super) fn overlay_output_under(&self, dims: WindowDims) -> Option<Entity> {
         let centre_x = dims.x as i32 + dims.width as i32 / 2;
         let centre_y = dims.y as i32 + dims.height as i32 / 2;
         let mut query = self.world.query::<(&OutputDimensions, &Overlay)>();
@@ -357,7 +357,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 }
 
 /// The output whose overlay an overlay popup is of.
-pub(super) struct OverlayParent(Entity);
+pub(super) struct OverlayParent(pub(super) Entity);
 
 /// The buffer Xwayland last attached to an overlay popup, for the popup made again on
 /// another output: Xwayland attaches none for a window only moved.
