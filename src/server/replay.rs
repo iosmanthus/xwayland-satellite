@@ -411,13 +411,14 @@ fn explains(id: ChangeId, divergence: &Divergence) -> bool {
         }
         (ChangeId::Rule5PressFocusesPressed, Divergence::Focus(b)) => {
             b.before.panel.is_some_and(|panel| b.raw.iter().any(|event| {
-                pressed(event).is_some_and(|w| !in_family(&b.roles, w, panel))
+                pressed(event).is_some_and(|w| overlay(&b.roles, w).is_none() && !in_family(&b.roles, w, panel))
                     && focuses_press_or_compositor(b, event)
             }))
         }
         (ChangeId::Rule5PressWithoutPanel, Divergence::Focus(b)) => {
             b.before.panel.is_none() && b.old.is_empty()
                 && b.raw.iter().any(|event| matches!(event, RawEvent::Press { .. })
+                    && pressed(event).is_none_or(|w| overlay(&b.roles, w).is_none())
                     && focuses_press_or_compositor(b, event))
         }
         (ChangeId::Rule7BarUnderPanel, Divergence::Focus(b)) => {
@@ -921,14 +922,7 @@ mod allowance_tests {
         assert_eq!(cases.iter().map(|(id, _)| *id).collect::<Vec<_>>(), CHANGES);
         for (id, d) in cases {
             assert!(explains(id, &d), "{id:?}: {d:#?}");
-            // The table's rule 5 predicates also include overlay windows. Keep its
-            // explicit first-match order, even though that shadows immediate rule 7.
-            let first = if id == ChangeId::Rule7ImmediatePress {
-                ChangeId::Rule5PressWithoutPanel
-            } else {
-                id
-            };
-            assert_eq!(allowed(&d), Some(first), "{id:?}: {d:#?}");
+            assert_eq!(allowed(&d), Some(id), "{id:?}: {d:#?}");
         }
         assert_eq!(allowed(&Divergence::Focus(batch())), None);
     }
@@ -1073,7 +1067,7 @@ mod allowance_tests {
         b.new = vec![focus(6)];
         let d = Divergence::Focus(b);
         assert!(explains(ChangeId::Rule7ImmediatePress, &d));
-        assert_eq!(allowed(&d), Some(ChangeId::Rule5PressFocusesPressed));
+        assert_eq!(allowed(&d), Some(ChangeId::Rule7ImmediatePress));
     }
 
     #[test]
