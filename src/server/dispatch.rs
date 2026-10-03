@@ -1659,9 +1659,7 @@ impl<S: X11Selection> Dispatch<XwaylandSurfaceV1, Entity> for InnerServerState<S
                     if mapped {
                         state.sync_outputs();
                         state.feed(RawEvent::RoleCreate { window: win, dims });
-                        if state.create_role_window(win, *entity) {
-                            state.activate_window(win);
-                        }
+                        state.create_role_window(win, *entity);
                     }
                 } else {
                     state.world.insert(*entity, (serial,)).unwrap();

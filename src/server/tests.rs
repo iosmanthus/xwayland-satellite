@@ -2273,16 +2273,22 @@ fn notification_without_click_stays_on_overlay() {
 fn panel_over_meeting(
     f: &mut TestFixture<FakeXConnection>,
     comp: &Compositor,
-) -> (Window, testwl::SurfaceId, Window, Window) {
+) -> (
+    Window,
+    testwl::SurfaceId,
+    Window,
+    Window,
+    TestObject<WlSurface>,
+) {
     let main = Window::new(1);
     let (_, main_id) = f.create_toplevel(comp, main);
     let meeting = Window::new(2);
     f.create_toplevel(comp, meeting);
     assert_eq!(f.connection().focused_window, Some(meeting));
     let panel = Window::new(3);
-    new_panel(f, comp, panel, meeting);
+    let (panel_surface, _) = new_panel(f, comp, panel, meeting);
     assert_eq!(f.connection().focused_window, Some(panel));
-    (main, main_id, meeting, panel)
+    (main, main_id, meeting, panel, panel_surface)
 }
 
 // Feishu closes a meeting panel the moment it loses focus. When the compositor
@@ -2298,7 +2304,7 @@ fn panel_keeps_focus_the_pointer_moves() {
     let _keyboard =
         TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     new_overlay_output(&mut f, 0, 0);
-    let (main, main_id, _, panel) = panel_over_meeting(&mut f, &comp);
+    let (main, main_id, _, panel, _) = panel_over_meeting(&mut f, &comp);
 
     f.testwl.focus_toplevel(main_id);
     f.run();
@@ -2323,20 +2329,28 @@ fn panel_keeps_focus_the_pointer_moves() {
 // Feishu shows a tooltip by its fullscreen meeting's emoji panel, right under the
 // pointer: an override-redirect window transient for the panel, so on the overlay.
 // niri's focus follows the mouse onto the overlay (an on-demand layer) with no click
-// on it; the panel keeps X focus, or Feishu closes it at once.
+// on it; the panel keeps X focus, or Feishu closes it at once, and keys go to it.
 #[test]
 fn panel_keeps_focus_the_pointer_takes_to_overlay() {
     let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
     let comp = f.compositor();
-    let _keyboard =
+    let keyboard =
         TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     let (_, overlay) = new_overlay_output(&mut f, 0, 0);
-    let (_, _, _, panel) = panel_over_meeting(&mut f, &comp);
+    let (_, _, _, panel, panel_surface) = panel_over_meeting(&mut f, &comp);
+    std::mem::take(&mut *keyboard.data.events.lock().unwrap());
 
     f.testwl.focus_toplevel(overlay);
     f.run();
     f.run();
     assert_eq!(f.connection().focused_window, Some(panel));
+    let entered = std::mem::take(&mut *keyboard.data.events.lock().unwrap())
+        .into_iter()
+        .find_map(|event| match event {
+            wl_keyboard::Event::Enter { surface, .. } => Some(surface),
+            _ => None,
+        });
+    assert_eq!(entered.map(|s| s.id()), Some(panel_surface.obj.id()));
 }
 
 // A click in the panel while it keeps focus from the window the pointer went over
@@ -2384,7 +2398,7 @@ fn closed_panel_gives_focus_to_focused_window() {
     let _keyboard =
         TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     new_overlay_output(&mut f, 0, 0);
-    let (main, main_id, _, panel) = panel_over_meeting(&mut f, &comp);
+    let (main, main_id, _, panel, _) = panel_over_meeting(&mut f, &comp);
 
     f.testwl.focus_toplevel(main_id);
     f.run();
@@ -2405,7 +2419,7 @@ fn panel_loses_focus_to_other_clients() {
     let _keyboard =
         TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     new_overlay_output(&mut f, 0, 0);
-    let (_, main_id, _, _) = panel_over_meeting(&mut f, &comp);
+    let (_, main_id, _, _, _) = panel_over_meeting(&mut f, &comp);
 
     f.testwl.focus_toplevel(main_id);
     f.run();
@@ -2854,12 +2868,12 @@ fn raise_window_on_pointer_event() {
     f.testwl.move_pointer_to(id2, 0.0, 0.0);
     f.run();
     assert_eq!(f.connection().focused_window, Some(win2));
-    assert_eq!(f.satellite.last_hovered, Some(win2));
+    assert_eq!(f.satellite.model.roles.last_hovered, Some(win2));
 
     f.testwl.move_pointer_to(id1, 0.0, 0.0);
     f.run();
     assert_eq!(f.connection().focused_window, Some(win2));
-    assert_eq!(f.satellite.last_hovered, Some(win1));
+    assert_eq!(f.satellite.model.roles.last_hovered, Some(win1));
 }
 
 #[test]
@@ -2876,7 +2890,7 @@ fn override_redirect_choose_hover_window() {
 
     f.testwl.move_pointer_to(id1, 0.0, 0.0);
     f.run();
-    assert_eq!(f.satellite.last_hovered, Some(win1));
+    assert_eq!(f.satellite.model.roles.last_hovered, Some(win1));
 
     let win3 = Window::new(3);
     let (buffer, surface) = comp.create_surface();

@@ -435,22 +435,6 @@ impl XState {
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
-                    let active_win = self
-                        .connection
-                        .wait_for_reply(self.get_property_cookie(
-                            self.root,
-                            self.atoms.active_win,
-                            x::ATOM_WINDOW,
-                            1,
-                        ))
-                        .unwrap();
-
-                    let active_win: &[x::Window] = active_win.value();
-                    if active_win[0] == e.window() {
-                        let restore_to = server_state.focus_restore_target();
-                        server_state.connection.focus_window(restore_to, None);
-                    }
-
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
                         &x::ChangeWindowAttributes {
                             window: e.window(),

@@ -225,11 +225,6 @@ impl SurfaceEvents {
                         state.current_scale,
                     );
                     win_data.update_output_offset(*window, WindowOutputOffset { x, y }, connection);
-                    if state.last_focused_toplevel == Some(*window) {
-                        let output = get_output_name(Some(&on_output), &state.world);
-                        debug!("focused window changed outputs - resetting primary output");
-                        connection.focus_window(*window, output);
-                    }
 
                     if state.fractional_scale.is_none() {
                         let output_scale = output_data.get::<&OutputScaleFactor>().unwrap().get();
@@ -473,22 +468,6 @@ impl SurfaceEvents {
 
                 if first_configure {
                     let window = *data.get::<&x::Window>().unwrap();
-                    let has_take_focus = data.get::<&WindowData>().unwrap().attrs.has_take_focus;
-                    let focus_on_map = data.get::<&Classified>().map(|c| c.0.focus_on_map);
-                    if focus_on_map == Some(FocusOnMap::Panel) {
-                        state.inner.focused_overlay = Some(target);
-                    }
-                    if matches!(
-                        focus_on_map,
-                        Some(FocusOnMap::Panel | FocusOnMap::SetInput | FocusOnMap::TakeFocus)
-                    ) {
-                        state.inner.to_focus = Some(FocusData {
-                            window,
-                            output_name: None,
-                            is_popup: true,
-                            has_take_focus,
-                        });
-                    }
                     state.inner.feed(RawEvent::PopupFirstConfigure { window });
                 }
             }
@@ -737,9 +716,6 @@ impl Event for client::wl_pointer::Event {
                         surface_y * scale.0 + offset_y,
                     );
                     connection.raise_to_top(window);
-                    if !surface_is_popup {
-                        state.last_hovered = Some(window);
-                    }
                     cmd.insert_one(target, CurrentSurface::Xwayland(surface_entity.unwrap()));
                     match overlay_pointer.take().flatten() {
                         Some(position) => cmd.insert_one(target, position),
@@ -909,45 +885,8 @@ impl Event for client::wl_pointer::Event {
                     }
                 }
 
-                let pressed_overlay = match current_surface {
-                    CurrentSurface::Xwayland(entity)
-                        if button_state
-                            == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
-                            && state
-                                .world
-                                .satisfies::<&overlay::Placement>(*entity)
-                                .unwrap_or(false) =>
-                    {
-                        Some(*entity)
-                    }
-                    _ => None,
-                };
-                let pressed = match current_surface {
-                    CurrentSurface::Xwayland(entity)
-                        if button_state
-                            == WEnum::Value(client::wl_pointer::ButtonState::Pressed) =>
-                    {
-                        Some(*entity)
-                    }
-                    _ => None,
-                };
-                let pressed_window = pressed.is_some() && pressed_overlay.is_none();
                 server.button(serial, time, button, convert_wenum(button_state));
                 drop(query);
-                if pressed_overlay.is_some() {
-                    state.overlay_pressed = pressed_overlay;
-                }
-                if let Some(entity) = pressed {
-                    state.last_press = Some((entity, std::time::Instant::now()));
-                }
-                // A click in the window the compositor focused while a panel kept X focus:
-                // focus goes there now (see `panel_keeps_focus`). A click in the panel
-                // itself is the user using it: it keeps focus.
-                if pressed_window && state.held_focus.is_some() && pressed != state.focused_overlay
-                {
-                    state.to_focus = state.held_focus.take();
-                    state.focused_overlay = None;
-                }
                 cmd.run_on(&mut state.world);
                 if is_press {
                     state.feed(RawEvent::Press {
@@ -1011,42 +950,42 @@ impl Event for client::wl_keyboard::Event {
                 surface,
                 keys,
             } => {
+                let seat = data
+                    .get::<&client::wl_seat::WlSeat>()
+                    .as_deref()
+                    .unwrap()
+                    .clone();
+                drop(keyboard);
+                state.last_kb_serial = Some((seat, serial));
+                state
+                    .world
+                    .insert_one(target, overlay::LastKeyboardSerial(serial))
+                    .unwrap();
+
                 if surface.data::<overlay::OverlayMarker>().is_some() {
                     let Some(output) = state.overlay_output_id(&surface) else {
                         // The overlay's output went away between the compositor giving it
                         // keyboard focus and this event reaching us (output unplugged, or the
                         // layer surface closed): nothing to feed or forward to.
-                        drop(keyboard);
                         return;
                     };
-                    let surf_ref = SurfaceRef::Overlay(output);
-                    let seat = data.get::<&client::wl_seat::WlSeat>().as_deref().cloned();
-                    drop(keyboard);
-                    state.feed(RawEvent::KeyboardEnter {
-                        target: surf_ref,
-                        serial,
-                    });
-                    if state.overlay_keyboard_enter(target, serial, keys) {
-                        state.last_kb_serial = seat.map(|seat| (seat, serial));
-                    } else if state.panel_keeps_focus() {
-                        // No press on the overlay: the compositor gave it keyboard focus only
-                        // because the pointer went over one of its windows (niri's focus
-                        // follows the mouse onto on-demand layers), as over a tooltip Feishu
-                        // shows by its fullscreen meeting's emoji panel. The panel keeps X
-                        // focus, as it does from an X window the pointer goes over.
-                        state.unfocus = false;
-                    }
-                    return;
-                }
-                let mut query = surface.data().copied().and_then(|key| {
                     state
                         .world
-                        .query_one::<(&x::Window, &WlSurface, Option<&OnOutput>)>(key)
-                        .ok()
-                });
-                let Some((window, surface, output)) = query.as_mut().and_then(|q| q.get()) else {
+                        .insert_one(target, overlay::OnOverlay::new(output, &keys))
+                        .unwrap();
+                    // The route that follows enters the routed surface with these keys.
+                    state.feed(RawEvent::KeyboardEnter {
+                        target: SurfaceRef::Overlay(output),
+                        serial,
+                    });
+                    return;
+                }
+                let mut query = surface
+                    .data()
+                    .copied()
+                    .and_then(|key| state.world.query_one::<(&x::Window, &WlSurface)>(key).ok());
+                let Some((window, surface)) = query.as_mut().and_then(|q| q.get()) else {
                     drop(query);
-                    drop(keyboard);
                     state.feed(RawEvent::KeyboardEnter {
                         target: SurfaceRef::Other,
                         serial,
@@ -1054,35 +993,10 @@ impl Event for client::wl_keyboard::Event {
                     return;
                 };
                 let window_copy = *window;
-                state.last_kb_serial = Some((
-                    data.get::<&client::wl_seat::WlSeat>()
-                        .as_deref()
-                        .unwrap()
-                        .clone(),
-                    serial,
-                ));
-                let output_name = get_output_name(output, &state.world);
-                let has_take_focus = data
-                    .get::<&WindowData>()
-                    .is_some_and(|d| d.attrs.has_take_focus);
-                let focus = FocusData {
-                    window: window_copy,
-                    output_name,
-                    is_popup: false,
-                    has_take_focus,
-                };
-                if state.panel_keeps_focus() {
-                    // X focus stays with the panel, including from a window left just
-                    // before; this window gets it once the panel goes or is clicked away.
-                    state.held_focus = Some(focus);
-                    state.unfocus = false;
-                } else {
-                    state.focused_overlay = None;
-                    state.to_focus = Some(focus);
-                }
+                let keyboard = state.world.get::<&WlKeyboard>(target).unwrap();
                 keyboard.enter(serial, surface, keys);
-                drop(query);
                 drop(keyboard);
+                drop(query);
                 state.feed(RawEvent::KeyboardEnter {
                     target: SurfaceRef::X(window_copy),
                     serial,
@@ -1090,20 +1004,24 @@ impl Event for client::wl_keyboard::Event {
             }
             client::wl_keyboard::Event::Leave { serial, surface } => {
                 if surface.data::<overlay::OverlayMarker>().is_some() {
-                    let Some(output) = state.overlay_output_id(&surface) else {
-                        // The overlay's output went away between the compositor giving it
-                        // keyboard focus and this event reaching us (output unplugged, or the
-                        // layer surface closed): nothing to feed or forward to.
+                    let Some(output) = state
+                        .world
+                        .get::<&overlay::OnOverlay>(target)
+                        .ok()
+                        .map(|o| o.output)
+                    else {
                         drop(keyboard);
                         return;
                     };
-                    let surf_ref = SurfaceRef::Overlay(output);
                     drop(keyboard);
+                    // The route drops and its surface gets a leave while `OnOverlay` is
+                    // still there; after an `OverlayGone` the model ignores this leave and
+                    // `apply_route(None)` has already run.
                     state.feed(RawEvent::KeyboardLeave {
-                        target: surf_ref,
+                        target: SurfaceRef::Overlay(output),
                         serial,
                     });
-                    state.overlay_keyboard_leave(target, serial);
+                    state.world.remove_one::<overlay::OnOverlay>(target).ok();
                     return;
                 }
                 if !surface.is_alive() {
@@ -1123,14 +1041,6 @@ impl Event for client::wl_keyboard::Event {
                     return;
                 };
                 let window_copy = *window;
-                if state.held_focus.as_ref().map(|d| d.window) == Some(window_copy) {
-                    state.held_focus = None;
-                }
-                if state.to_focus.as_ref().map(|d| d.window) == Some(window_copy) {
-                    state.to_focus.take();
-                } else {
-                    state.unfocus = true;
-                }
                 keyboard.leave(serial, surface);
                 drop(query);
                 drop(keyboard);
@@ -1145,19 +1055,45 @@ impl Event for client::wl_keyboard::Event {
                 key,
                 state: key_state,
             } => {
-                state.last_kb_serial = Some((
-                    data.get::<&client::wl_seat::WlSeat>()
-                        .as_deref()
-                        .unwrap()
-                        .clone(),
-                    serial,
-                ));
+                let pressed = key_state == WEnum::Value(client::wl_keyboard::KeyState::Pressed);
+                if let Ok(mut on_overlay) = state.world.get::<&mut overlay::OnOverlay>(target) {
+                    on_overlay.key(key, pressed);
+                }
+                let seat = data
+                    .get::<&client::wl_seat::WlSeat>()
+                    .as_deref()
+                    .unwrap()
+                    .clone();
                 keyboard.key(serial, time, key, convert_wenum(key_state));
                 drop(keyboard);
-                state.feed(RawEvent::Key {
-                    pressed: key_state == WEnum::Value(client::wl_keyboard::KeyState::Pressed),
-                    serial,
-                });
+                state.last_kb_serial = Some((seat, serial));
+                state
+                    .world
+                    .insert_one(target, overlay::LastKeyboardSerial(serial))
+                    .unwrap();
+                state.feed(RawEvent::Key { pressed, serial });
+            }
+            client::wl_keyboard::Event::Modifiers {
+                serial,
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+            } => {
+                keyboard.modifiers(serial, mods_depressed, mods_latched, mods_locked, group);
+                drop(keyboard);
+                state
+                    .world
+                    .insert_one(
+                        target,
+                        overlay::LastModifiers {
+                            depressed: mods_depressed,
+                            latched: mods_latched,
+                            locked: mods_locked,
+                            group,
+                        },
+                    )
+                    .unwrap();
             }
             _ => simple_event_shunt! {
                 keyboard, self => [
@@ -1165,13 +1101,6 @@ impl Event for client::wl_keyboard::Event {
                         |format| convert_wenum(format),
                         |fd| fd.as_fd(),
                         size
-                    },
-                    Modifiers {
-                        serial,
-                        mods_depressed,
-                        mods_latched,
-                        mods_locked,
-                        group
                     },
                     RepeatInfo {
                         rate,
@@ -1263,10 +1192,7 @@ impl Event for client::wl_touch::Event {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(super) struct OnOutput(pub Entity);
-struct OutputName(String);
-fn get_output_name(output: Option<&OnOutput>, world: &World) -> Option<String> {
-    output.map(|o| world.get::<&OutputName>(o.0).unwrap().0.clone())
-}
+pub(super) struct OutputName(pub(super) String);
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub(super) enum OutputScaleFactor {

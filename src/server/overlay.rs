@@ -33,6 +33,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
+use wayland_server::Resource;
 use wayland_server::protocol as server;
 use xcb::x;
 
@@ -118,6 +119,10 @@ impl Overlay {
     pub(super) fn destroy(self) {
         self.layer.destroy();
         self.surface.destroy();
+    }
+
+    pub(super) fn surface(&self) -> &WlSurface {
+        &self.surface
     }
 }
 
@@ -499,123 +504,106 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 }
 
-/// The notification window keyboard focus on an overlay goes to: a component of the
-/// keyboard's entity.
-pub(super) struct OverlayKeyboard(Entity);
+/// A keyboard whose compositor focus is on `output`'s overlay, with the keys held now: those
+/// the compositor said were down when it entered, kept current by its key events, so a
+/// re-route enters the new surface with what is really held (Xwayland presses every key an
+/// enter lists and releases them all on leave). A component of the keyboard's entity.
+pub(super) struct OnOverlay {
+    pub(super) output: OutputId,
+    pub(super) keys: Vec<u32>,
+}
+
+impl OnOverlay {
+    /// `keys` as the compositor sends them: native-endian u32 key codes.
+    pub(super) fn new(output: OutputId, keys: &[u8]) -> Self {
+        let keys = keys
+            .chunks_exact(4)
+            .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        Self { output, keys }
+    }
+
+    /// The held keys as a `wl_keyboard.enter` carries them.
+    pub(super) fn keys_array(&self) -> Vec<u8> {
+        self.keys.iter().flat_map(|k| k.to_ne_bytes()).collect()
+    }
+
+    pub(super) fn key(&mut self, key: u32, pressed: bool) {
+        self.keys.retain(|&k| k != key);
+        if pressed {
+            self.keys.push(key);
+        }
+    }
+}
+
+/// The Xwayland surface a keyboard on an overlay gives keys to (design §2.0).
+pub(super) struct Routed(pub(super) Entity);
+
+/// The latest serial the compositor sent on a keyboard (enter or key), for the enters and
+/// leaves satellite sends Xwayland itself.
+pub(super) struct LastKeyboardSerial(pub(super) u32);
+
+/// The modifiers the compositor last sent on a keyboard, sent again after a re-route.
+pub(super) struct LastModifiers {
+    pub(super) depressed: u32,
+    pub(super) latched: u32,
+    pub(super) locked: u32,
+    pub(super) group: u32,
+}
 
 impl<S: X11Selection> InnerServerState<S> {
-    /// Gives keyboard focus on an overlay to the notification window the pointer was last
-    /// pressed in: the surface with keyboard focus is Xwayland's, and X gives keys to the
-    /// window with input focus.
-    pub(super) fn overlay_keyboard_enter(
-        &mut self,
-        keyboard: Entity,
-        serial: u32,
-        keys: Vec<u8>,
-    ) -> bool {
-        let Some(entity) = self.overlay_pressed else {
-            return false;
-        };
-        let Ok(mut query) = self.world.query_one::<(
-            &x::Window,
-            &server::wl_surface::WlSurface,
-            &WindowData,
-            &Placement,
-        )>(entity) else {
-            return false;
-        };
-        let Some((window, surface, data, _)) = query.get() else {
-            return false;
-        };
-        let window = *window;
-        let has_take_focus = data.attrs.has_take_focus;
-        let Ok(server) = self.world.get::<&server::wl_keyboard::WlKeyboard>(keyboard) else {
-            return false;
-        };
-        server.enter(serial, surface, keys);
-        drop(server);
-        drop(query);
-        self.to_focus = Some(super::FocusData {
-            window,
-            output_name: None,
-            is_popup: true,
-            has_take_focus,
-        });
-        self.world
-            .insert_one(keyboard, OverlayKeyboard(entity))
-            .unwrap();
-        self.focused_overlay = Some(entity);
-        self.held_focus = None;
-        true
-    }
-
-    /// Takes keyboard focus on an overlay from the notification window it went to.
-    pub(super) fn overlay_keyboard_leave(&mut self, keyboard: Entity, serial: u32) {
-        let Ok(OverlayKeyboard(entity)) = self.world.remove_one::<OverlayKeyboard>(keyboard) else {
-            return;
-        };
-        if self.focused_overlay == Some(entity) {
-            self.focused_overlay = None;
-        }
-        let server = self.world.get::<&server::wl_keyboard::WlKeyboard>(keyboard);
-        let surface = self.world.get::<&server::wl_surface::WlSurface>(entity);
-        if let (Ok(server), Ok(surface)) = (server, surface) {
-            server.leave(serial, &surface);
-        }
-        self.unfocus = true;
-    }
-
-    /// Whether the notification window with focus is a panel keeping it (see
-    /// `WindowAttributes::is_focused_panel`). Feishu closes its meeting panels the moment
-    /// they lose focus, so keyboard focus the compositor gives another X window only
-    /// because the pointer went over it (focus follows the mouse) is held until the panel
-    /// goes or a click in that window asks for it, as a menu would keep it.
-    pub(super) fn panel_keeps_focus(&self) -> bool {
-        self.focused_overlay.is_some_and(|entity| {
-            self.world
-                .get::<&super::Classified>(entity)
-                .is_ok_and(|c| c.0.role.is_panel())
-        })
-    }
-
-    /// Takes keyboard focus from a notification window going away.
-    pub(super) fn overlay_window_unmapped(&mut self, entity: Entity) {
-        if self.overlay_pressed == Some(entity) {
-            self.overlay_pressed = None;
-        }
-        if self.focused_overlay == Some(entity) {
-            self.focused_overlay = None;
-            // Back where the compositor has keyboard focus: the window it focused while
-            // the panel kept X focus, else the last one that had it.
-            if let Some(held) = self.held_focus.take() {
-                self.to_focus = Some(held);
-            } else if let Some(window) = self.last_focused_toplevel {
-                let has_take_focus = self
-                    .windows
-                    .get(&window)
-                    .and_then(|&e| self.world.get::<&WindowData>(e).ok())
-                    .is_some_and(|data| data.attrs.has_take_focus);
-                self.to_focus = Some(super::FocusData {
-                    window,
-                    output_name: None,
-                    is_popup: false,
-                    has_take_focus,
-                });
-            }
-        }
+    /// Gives the keys of every keyboard on an overlay to `route`'s window (or to nothing):
+    /// the surface with keyboard focus is Xwayland's, and X gives keys to the window with
+    /// X focus.
+    pub(super) fn apply_route(&mut self, route: Option<x::Window>) {
+        let target = route.and_then(|w| self.windows.get(&w).copied());
         let keyboards: Vec<Entity> = self
             .world
-            .query::<&OverlayKeyboard>()
+            .query::<&OnOverlay>()
             .iter()
-            .filter(|(_, focus)| focus.0 == entity)
             .map(|(keyboard, _)| keyboard)
             .collect();
-        let serial = self
-            .last_kb_serial
-            .as_ref()
-            .map_or(0, |(_, serial)| *serial);
         for keyboard in keyboards {
-            self.overlay_keyboard_leave(keyboard, serial);
+            let serial = self
+                .world
+                .get::<&LastKeyboardSerial>(keyboard)
+                .map_or(0, |s| s.0);
+            if let Ok(Routed(old)) = self.world.remove_one::<Routed>(keyboard)
+                && let (Ok(server), Ok(surface)) = (
+                    self.world.get::<&server::wl_keyboard::WlKeyboard>(keyboard),
+                    self.world.get::<&server::wl_surface::WlSurface>(old),
+                )
+                && surface.is_alive()
+            {
+                server.leave(serial, &surface);
+            }
+            let Some(entity) = target else {
+                continue;
+            };
+            let entered = {
+                let keys = self
+                    .world
+                    .get::<&OnOverlay>(keyboard)
+                    .map(|o| o.keys_array())
+                    .unwrap_or_default();
+                let (Ok(server), Ok(surface)) = (
+                    self.world.get::<&server::wl_keyboard::WlKeyboard>(keyboard),
+                    self.world.get::<&server::wl_surface::WlSurface>(entity),
+                ) else {
+                    continue;
+                };
+                if !surface.is_alive() {
+                    continue;
+                }
+                server.enter(serial, &surface, keys);
+                if let Ok(m) = self.world.get::<&LastModifiers>(keyboard) {
+                    server.modifiers(serial, m.depressed, m.latched, m.locked, m.group);
+                }
+                true
+            };
+            if entered {
+                self.world.insert_one(keyboard, Routed(entity)).unwrap();
+            }
         }
     }
 }

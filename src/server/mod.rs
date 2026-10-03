@@ -16,8 +16,9 @@ mod tests;
 use self::classify::x_kind;
 use self::event::*;
 use self::model::{
-    Classification, FocusOnMap, InputHint, Millis, Model, MotifHints, NetWmType, OutputId,
-    PressRef, RawEvent, Role, SizeHints, SurfaceRef, WindowFacts, XKind, XRect,
+    Classification, InputHint, KbTarget, Method, Millis, Model, MotifHints, NetWmType, Output,
+    OutputId, PressRef, RawEvent, Role, SizeHints, SurfaceRef, WindowFacts, XFocusChange, XKind,
+    XRect,
 };
 use crate::xstate::{
     Decorations, MoveResizeDirection, WindowDims, WindowRole, WmHints, WmName, WmNormalHints,
@@ -442,13 +443,6 @@ fn handle_new_globals<'a, S: X11Selection + 'static>(
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub(super) struct GlobalName(pub u32);
 
-struct FocusData {
-    window: x::Window,
-    output_name: Option<String>,
-    is_popup: bool,
-    has_take_focus: bool,
-}
-
 #[derive(Copy, Clone, Default)]
 struct GlobalOutputOffsetDimension {
     owner: Option<Entity>,
@@ -535,10 +529,6 @@ pub struct InnerServerState<S: X11Selection> {
     qh: QueueHandle<MyWorld>,
     globals_map: HashMap<GlobalName, (Global, GlobalId)>,
     client: Client,
-    to_focus: Option<FocusData>,
-    unfocus: bool,
-    last_focused_toplevel: Option<x::Window>,
-    last_hovered: Option<x::Window>,
 
     xdg_wm_base: XdgWmBase,
     compositor: client::wl_compositor::WlCompositor,
@@ -549,15 +539,6 @@ pub struct InnerServerState<S: X11Selection> {
     decoration_manager: Option<ZxdgDecorationManagerV1>,
     layer_shell: Option<ZwlrLayerShellV1>,
     display: client::wl_display::WlDisplay,
-    /// The notification window the pointer was last pressed in, to give keys to.
-    overlay_pressed: Option<Entity>,
-    /// The X window the pointer was last pressed in, and when.
-    last_press: Option<(Entity, Instant)>,
-    /// The notification window with focus, whose input method windows go over it.
-    focused_overlay: Option<Entity>,
-    /// The window the compositor gave keyboard focus while a focused panel kept X focus,
-    /// to focus once the panel goes or a click asks for it (see `panel_keeps_focus`).
-    held_focus: Option<FocusData>,
     selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -573,6 +554,10 @@ pub struct InnerServerState<S: X11Selection> {
     resource_id_mask: u32,
     /// The X geometry and mode of each output, as last fed to the model.
     output_geometry: HashMap<OutputId, (XRect, (i32, i32))>,
+    /// The model's `XFocus` output for the batch now ending, applied at `BatchEnd`.
+    pending_xfocus: Option<XFocusChange>,
+    /// The RandR primary output last set, kept when a focused window's output is unknown.
+    last_primary: Option<String>,
 }
 
 impl<S: X11Selection> ServerState<NoConnection<S>> {
@@ -663,10 +648,6 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             qh,
             globals_map,
             dh,
-            to_focus: None,
-            unfocus: false,
-            last_focused_toplevel: None,
-            last_hovered: None,
             xdg_wm_base,
             compositor,
             subcompositor,
@@ -693,15 +674,13 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             decoration_manager,
             layer_shell,
             display,
-            overlay_pressed: None,
-            last_press: None,
-            focused_overlay: None,
-            held_focus: None,
             world,
             model: Model::default(),
             clock: Instant::now(),
             resource_id_mask: 0x1f_ffff,
             output_geometry: HashMap::new(),
+            pending_xfocus: None,
+            last_primary: None,
         };
         Self {
             inner,
@@ -848,33 +827,8 @@ impl<C: XConnection> ServerState<C> {
 
         self.sync_outputs();
         self.feed(RawEvent::BatchEnd);
-
-        {
-            if let Some(FocusData {
-                window,
-                output_name,
-                is_popup,
-                has_take_focus,
-            }) = self.to_focus.take()
-            {
-                debug!(
-                    "focusing (take_focus={has_take_focus:?}) {} {window:?}",
-                    if is_popup { "popup" } else { "window" }
-                );
-                if has_take_focus {
-                    self.connection.send_take_focus(window);
-                } else {
-                    self.connection.focus_window(window, output_name);
-                    if !is_popup {
-                        self.last_focused_toplevel = Some(window);
-                    }
-                }
-            } else if self.unfocus {
-                self.connection.focus_window(x::WINDOW_NONE, None);
-                self.focused_overlay = None;
-                self.held_focus = None;
-            }
-            self.unfocus = false;
+        if let Some(change) = self.pending_xfocus.take() {
+            self.apply_xfocus(change);
         }
 
         self.handle_selection_events();
@@ -917,11 +871,33 @@ impl<C: XConnection> ServerState<C> {
     fn close_x_window(&mut self, window: x::Window) {
         debug!("sending close request to {window:?}");
         self.connection.close_window(window);
-        if self.last_focused_toplevel == Some(window) {
-            self.last_focused_toplevel.take();
-        }
-        if self.last_hovered == Some(window) {
-            self.last_hovered.take();
+    }
+
+    /// Tells X what the window model decided (design §2.0: SetInputFocus and the rest, or
+    /// WM_TAKE_FOCUS only).
+    fn apply_xfocus(&mut self, change: XFocusChange) {
+        debug!("focusing {change:?}");
+        match change {
+            XFocusChange::None => self.connection.focus_window(x::WINDOW_NONE, None),
+            XFocusChange::Window {
+                window,
+                method: Method::TakeFocus,
+                ..
+            } => self.connection.send_take_focus(window),
+            XFocusChange::Window {
+                window,
+                method: Method::SetInput,
+                primary_output,
+            } => {
+                // An output not known yet keeps the primary as it is (rule 13).
+                let name = primary_output
+                    .and_then(|output| self.output_name(output))
+                    .or_else(|| self.last_primary.clone());
+                if name.is_some() {
+                    self.last_primary.clone_from(&name);
+                }
+                self.connection.focus_window(window, name);
+            }
         }
     }
 }
@@ -1268,13 +1244,18 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.clock.elapsed().as_millis() as Millis
     }
 
-    /// Feeds `raw` to the window model. Its outputs are carried out from T5b on; until
-    /// then the old focus code still decides, and they are only logged.
+    /// Feeds `raw` to the window model and carries out what it asks now: keys routed at
+    /// once, an activation token requested; X focus waits for the batch end.
     pub(super) fn feed(&mut self, raw: RawEvent) {
         let now = self.now_ms();
-        let outputs = self.model.feed(&raw, now);
-        if !outputs.is_empty() {
-            debug!(target: "window_model", "{raw:?} -> {outputs:?}");
+        for output in self.model.feed(&raw, now) {
+            match output {
+                Output::XFocus(change) => self.pending_xfocus = Some(change),
+                Output::KeyboardRoute(route) => self.apply_route(route),
+                Output::ActivationToken { window, surface } => {
+                    self.request_activation_token(window, surface)
+                }
+            }
         }
     }
 
@@ -1285,6 +1266,52 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             .iter()
             .find(|(_, (_, name))| name.0 == output.0)
             .map(|(entity, _)| entity)
+    }
+
+    /// The name the compositor gave `output`, if it has.
+    pub(super) fn output_name(&self, output: OutputId) -> Option<String> {
+        let entity = self.output_entity(output)?;
+        let name = self.world.get::<&OutputName>(entity).ok()?;
+        Some(name.0.clone())
+    }
+
+    /// Asks the compositor to activate `window`, from the surface its keyboard focus is
+    /// on (design rule 12; the token names `window`'s class, smell #16).
+    fn request_activation_token(&mut self, window: x::Window, surface: KbTarget) {
+        let Some(activation_state) = self.activation_state.as_ref() else {
+            return;
+        };
+        let surface = match surface {
+            KbTarget::X(w) => self
+                .windows
+                .get(&w)
+                .and_then(|&e| self.world.get::<&client::wl_surface::WlSurface>(e).ok())
+                .map(|s| (*s).clone()),
+            KbTarget::Overlay(output) => self
+                .output_entity(output)
+                .and_then(|e| self.world.get::<&overlay::Overlay>(e).ok())
+                .map(|o| o.surface().clone()),
+        };
+        let Some(surface) = surface else {
+            warn!("no surface to activate {window:?} from");
+            return;
+        };
+        let app_id = self
+            .windows
+            .get(&window)
+            .and_then(|&e| self.world.get::<&WindowData>(e).ok())
+            .and_then(|d| d.attrs.class.clone());
+        activation_state.request_token_with_data(
+            &self.qh,
+            clientside::ActivationData::new(
+                window,
+                smithay_client_toolkit::activation::RequestData {
+                    app_id,
+                    seat_and_serial: self.last_kb_serial.clone(),
+                    surface: Some(surface),
+                },
+            ),
+        );
     }
 
     /// Feeds the model each output whose X rect or mode changed since it last saw it.
@@ -1461,29 +1488,15 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 return;
             }
             debug!("unmapping {window:?}");
-
-            if matches!(self.last_focused_toplevel, Some(x) if x == window) {
-                self.last_focused_toplevel.take();
-            }
-            if self.last_hovered == Some(window) {
-                self.last_hovered.take();
-            }
             win.mapped = false;
         }
 
-        self.overlay_window_unmapped(entity.unwrap());
         if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
             role.destroy();
         }
         let _ = self.world.remove_one::<Classified>(entity.unwrap());
 
         self.feed(RawEvent::Unmap { window });
-    }
-
-    /// Returns the window to restore focus to when the active window is unmapped.
-    /// If a toplevel was previously focused, returns it; otherwise returns `WINDOW_NONE`.
-    pub fn focus_restore_target(&self) -> x::Window {
-        self.last_focused_toplevel.unwrap_or(x::WINDOW_NONE)
     }
 
     pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
@@ -1537,44 +1550,6 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
     pub fn active_window_request(&mut self, window: x::Window) {
         self.feed(RawEvent::ActiveWindowRequest { window });
-        self.activate_window(window);
-    }
-
-    pub fn activate_window(&mut self, window: x::Window) {
-        let Some(activation_state) = self.activation_state.as_ref() else {
-            return;
-        };
-
-        let Some(last_focused_toplevel) = self.last_focused_toplevel else {
-            warn!("No last focused toplevel, cannot focus window {window:?}");
-            return;
-        };
-
-        let Some(data) = self
-            .windows
-            .get(&last_focused_toplevel)
-            .copied()
-            .and_then(|id| self.world.entity(id).ok())
-        else {
-            warn!("Unknown last focused toplevel, cannot focus window {window:?}");
-            return;
-        };
-
-        let Some(surface) = data.get::<&client::wl_surface::WlSurface>() else {
-            warn!("Last focused toplevel has no surface, cannot focus window {window:?}");
-            return;
-        };
-        activation_state.request_token_with_data(
-            &self.qh,
-            clientside::ActivationData::new(
-                window,
-                smithay_client_toolkit::activation::RequestData {
-                    app_id: data.get::<&WindowData>().unwrap().attrs.class.clone(),
-                    seat_and_serial: self.last_kb_serial.clone(),
-                    surface: Some((*surface).clone()),
-                },
-            ),
-        );
     }
 
     pub fn move_window(&mut self, window: x::Window) {
