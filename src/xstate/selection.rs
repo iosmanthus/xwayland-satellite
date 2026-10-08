@@ -352,10 +352,13 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         self.atom
     }
     fn set_owner(&self, connection: &xcb::Connection, wm_window: x::Window) -> bool {
+        // The Wayland selection is newer than the last X11 owner, so do not reuse that owner's
+        // timestamp: clients such as Qt ignore a SelectionClear or an owner change that is not
+        // newer than their own ownership, and then keep showing the old clipboard contents.
         if let Err(e) = connection.send_and_check_request(&x::SetSelectionOwner {
             owner: wm_window,
             selection: self.atom,
-            time: self.last_selection_timestamp,
+            time: x::CURRENT_TIME,
         }) {
             warn!(
                 "Could not become owner of {}: {e:?}",
