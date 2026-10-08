@@ -1769,6 +1769,58 @@ fn wayland_then_x11_clipboard_owner() {
 }
 
 #[test]
+fn x11_then_wayland_clipboard_timestamp() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+
+    connection.get_selection_owner_change_events(true, window);
+    connection.set_selection_owner(window, connection.atoms.clipboard);
+    let x11_owner = connection.await_selection_owner_change();
+    assert_eq!(x11_owner.owner(), window);
+
+    let request = connection.await_selection_request();
+    assert_eq!(request.target(), connection.atoms.targets);
+    connection.set_property(
+        request.requestor(),
+        x::ATOM_ATOM,
+        request.property(),
+        &[connection.atoms.mime1],
+    );
+    connection.send_selection_notify(&request);
+    f.wait_and_dispatch();
+
+    // Let the server time move past the X11 owner's timestamp.
+    std::thread::sleep(Duration::from_millis(10));
+    f.testwl.create_data_offer(vec![testwl::PasteData {
+        mime_type: "text/plain".into(),
+        data: b"boingloings".to_vec(),
+    }]);
+
+    // Clients such as Qt ignore a SelectionClear or an owner change that is not newer than their
+    // own ownership, and then keep showing the old clipboard contents.
+    let clear = match connection.await_event() {
+        xcb::Event::X(x::Event::SelectionClear(e)) => e,
+        other => panic!("Expected SelectionClear, got {other:?}"),
+    };
+    assert!(
+        clear.time() > x11_owner.timestamp(),
+        "SelectionClear time {} is not newer than the X11 owner's {}",
+        clear.time(),
+        x11_owner.timestamp()
+    );
+    let wayland_owner = connection.await_selection_owner_change();
+    assert_eq!(wayland_owner.owner(), connection.wm_window);
+    assert!(
+        wayland_owner.selection_timestamp() > x11_owner.timestamp(),
+        "Wayland selection time {} is not newer than the X11 owner's {}",
+        wayland_owner.selection_timestamp(),
+        x11_owner.timestamp()
+    );
+}
+
+#[test]
 fn fake_selection_targets() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
