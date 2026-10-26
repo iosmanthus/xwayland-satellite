@@ -273,6 +273,8 @@ pub enum ChangeId {
     HintsChangedAfterMap,
     Smell5OverrideRedirectPress,
     Q1RestoreMethod,
+    /// Another client's popup is the last focused toplevel's, not the hovered one's.
+    PopupParentByClient,
     UnmappedAnchorNotPanel,
     RemapFreshFacts,
     OldOnlyPanelGone,
@@ -436,7 +438,7 @@ pub fn replay_with_report(trace: &str) -> ReplayReport {
     report
 }
 
-const CHANGES: [ChangeId; 22] = [
+const CHANGES: [ChangeId; 23] = [
     ChangeId::Rule1PopupKeepsFocus,
     ChangeId::Rule2EnterThenLeave,
     ChangeId::Rule5PressFocusesPressed,
@@ -454,6 +456,7 @@ const CHANGES: [ChangeId; 22] = [
     ChangeId::HintsChangedAfterMap,
     ChangeId::Smell5OverrideRedirectPress,
     ChangeId::Q1RestoreMethod,
+    ChangeId::PopupParentByClient,
     ChangeId::UnmappedAnchorNotPanel,
     ChangeId::RemapFreshFacts,
     ChangeId::OldOnlyPanelGone,
@@ -677,6 +680,12 @@ fn explains(id: ChangeId, divergence: &Divergence) -> bool {
             matches!((b.old.last(), b.new.last()),
                 (Some(FocusCall::TakeFocus(old)), Some(XFocusChange::Window { window, method: Method::SetInput, .. }))
                     if old == window && b.roles.classification(*window).is_some_and(|c| c.role.is_toplevel()))
+        }
+        (ChangeId::PopupParentByClient, Divergence::Role { window, old, new, before, roles, raw, .. }) => {
+            let client = |w| facts_for(roles, raw, w).map(|f| f.client);
+            old.0 == RoleKind::Popup && new.0 == RoleKind::Popup
+                && old.1.is_some_and(|h| roles.last_hovered == Some(h) && client(h) != client(*window))
+                && new.1.is_some() && new.1 == before.last_toplevel
         }
         (ChangeId::UnmappedAnchorNotPanel, Divergence::Focus(b)) => unmapped_anchor_not_panel(b),
         (ChangeId::RemapFreshFacts, Divergence::Focus(b)) => remap_fresh_facts(b),
@@ -1094,6 +1103,25 @@ mod allowance_tests {
         }
     }
 
+    /// Window 3 (client 0) is a popup of `old` in the old code and of `new` in the model;
+    /// window 1 is hovered, of client `hovered_client`, and window 2 was focused last.
+    fn popup_parent(mut b: Batch, hovered_client: u32, old: u32, new: u32) -> Divergence {
+        b.roles.windows.get_mut(&win(1)).unwrap().facts.client = hovered_client;
+        b.roles.last_hovered = Some(win(1));
+        b.before.last_toplevel = Some(win(2));
+        Divergence::Role {
+            index: b.index,
+            window: win(3),
+            old: (RoleKind::Popup, Some(win(old)), None),
+            new: (RoleKind::Popup, Some(win(new)), None),
+            before: b.before,
+            roles: b.roles,
+            closing: b.closing,
+            raw: b.raw,
+            history: b.history,
+        }
+    }
+
     fn controller_case(id: ChangeId) -> Batch {
         let mut b = batch();
         b.old.clear();
@@ -1492,7 +1520,12 @@ mod allowance_tests {
         b.new = vec![focus(1)];
         cases.push((ChangeId::Q1RestoreMethod, Divergence::Focus(b)));
 
-        for id in CHANGES.into_iter().skip(17) {
+        cases.push((
+            ChangeId::PopupParentByClient,
+            popup_parent(batch(), 0x20_0000, 1, 2),
+        ));
+
+        for id in CHANGES.into_iter().skip(18) {
             cases.push((id, Divergence::Focus(controller_case(id))));
         }
         assert_eq!(cases.iter().map(|(id, _)| *id).collect::<Vec<_>>(), CHANGES);
@@ -1595,6 +1628,10 @@ mod allowance_tests {
         b.old = vec![FocusCall::TakeFocus(win(3))];
         b.new = vec![focus(3)];
         cases.push(Divergence::Focus(b));
+
+        // A popup of the hovered window's client, or one moved to a window not focused last.
+        cases.push(popup_parent(batch(), 0, 1, 2));
+        cases.push(popup_parent(batch(), 0x20_0000, 1, 4));
 
         for d in cases {
             assert_eq!(allowed(&d), None, "{d:#?}");

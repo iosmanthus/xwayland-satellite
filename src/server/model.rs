@@ -246,6 +246,13 @@ pub struct PanelContext {
     pub placement: PanelPlacement,
 }
 
+/// The last hovered toplevel, as classify reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hovered {
+    pub window: x::Window,
+    pub client: u32,
+}
+
 /// What classify reads about the rest of the world (spec §1.1 Input B).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ClassifyContext {
@@ -254,7 +261,7 @@ pub struct ClassifyContext {
     pub recent_press: Option<RecentPress>,
     pub panel: Option<PanelContext>,
     /// The last hovered toplevel, only if it has a role.
-    pub last_hovered: Option<x::Window>,
+    pub last_hovered: Option<Hovered>,
     /// The focus machine's `last_toplevel`, only if it has a role.
     pub last_toplevel: Option<x::Window>,
     /// The output whose X rect holds the window's centre, if its overlay is mapped.

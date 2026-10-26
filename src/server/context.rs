@@ -6,9 +6,9 @@
 use super::classify::classify;
 use super::focus::MAX_LINKS;
 use super::model::{
-    ClassifyContext, Event, FocusState, KbTarget, MachineInput, Millis, Model, Output, OutputId,
-    PanelContext, PanelPlacement, ParentRole, Press, PressLog, PressRef, PressTarget, RawEvent,
-    RecentPress, Role, RoleTable, SurfaceRef, WindowEntry, WindowFacts,
+    ClassifyContext, Event, FocusState, Hovered, KbTarget, MachineInput, Millis, Model, Output,
+    OutputId, PanelContext, PanelPlacement, ParentRole, Press, PressLog, PressRef, PressTarget,
+    RawEvent, RecentPress, Role, RoleTable, SurfaceRef, WindowEntry, WindowFacts,
 };
 use crate::xstate::WindowDims;
 use xcb::x;
@@ -233,7 +233,14 @@ pub fn derive_context(
             role: roles.parent_role(p.window),
         }),
         panel: focus.panel.and_then(|p| panel_context(roles, p)),
-        last_hovered: roles.last_hovered.filter(has_role),
+        last_hovered: roles
+            .last_hovered
+            .and_then(|w| roles.entry(w))
+            .filter(|e| e.classification.is_some())
+            .map(|e| Hovered {
+                window: e.facts.window,
+                client: e.facts.client,
+            }),
         last_toplevel: focus.last_toplevel.filter(has_role),
         centre_overlay: roles.overlay_under(facts.dims),
         fallback_overlay: fallback_overlay(roles, focus),

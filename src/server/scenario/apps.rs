@@ -18,6 +18,7 @@ const CAND: u32 = C | 1;
 const MOMENTS: u32 = B | 1;
 const BUBBLE: u32 = B | 2;
 const WECHAT_POPUP: u32 = B | 3;
+const WECHAT: u32 = B | 4;
 
 /// Feishu's meeting control bars: NOTIFICATION, frameless, min size only, no transient:
 /// on the overlay at their X position, no focus; dragged onto another output they are
@@ -141,6 +142,26 @@ fn danmaku_typing_with_fcitx5_candidates() {
         .expect(&[])
         .expect_panel(Some(win(PANEL)));
     s.unmap(win(CAND)).expect(&[]);
+}
+
+/// Typing in WeChat while the pointer last entered Feishu (focus moved by keyboard, or the
+/// pointer is on a Wayland window since): fcitx5's candidates go with the keyboard. As
+/// popups of the hovered window they showed on Feishu, out of sight.
+/// Sources: journal 2026-10-26 17:36:54 (X focus on WeChat 0xa00011, fcitx5's 0x400003 made
+/// a popup of Feishu's 0x1600004).
+#[test]
+fn candidates_go_with_the_keyboard() {
+    let mut s = Scenario::new("journal 2026-10-26 17:36:54");
+    s.output(O1, 0)
+        .focused_toplevel(MAIN)
+        .hover(win(MAIN))
+        .focused_toplevel(WECHAT);
+    s.map(candidates(CAND)).expect(&[]).expect_role(
+        win(CAND),
+        Role::Popup {
+            parent: win(WECHAT),
+        },
+    );
 }
 
 /// Feishu's incoming call bar: NORMAL, frameless, keep-above, program position, min size
