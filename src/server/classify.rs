@@ -3,7 +3,7 @@
 //! what it does to focus when shown.
 
 use super::model::{
-    Classification, ClassifyContext, FocusOnMap, InputHint, NetWmType, ParentRole, Role,
+    Classification, ClassifyContext, FocusOnMap, Hovered, InputHint, NetWmType, ParentRole, Role,
     WindowFacts, XKind,
 };
 use crate::xstate::{POPUP_WM_CLASSES, WindowRole};
@@ -171,8 +171,9 @@ fn notification(facts: &WindowFacts, ctx: &ClassifyContext, kind: XKind) -> Clas
     }
 }
 
-/// A popup: over the open panel if it belongs to it, else of the hovered or last
-/// focused toplevel, else a toplevel of its own.
+/// A popup: over the open panel if it belongs to it, else of the hovered toplevel if that
+/// is of its client, else of the last focused or the hovered toplevel, else a toplevel of
+/// its own.
 fn popup(facts: &WindowFacts, ctx: &ClassifyContext, kind: XKind) -> Classification {
     if let Some(panel) = ctx.panel {
         // An input method's candidates (any client) and the panel's own menus go with it:
@@ -196,7 +197,14 @@ fn popup(facts: &WindowFacts, ctx: &ClassifyContext, kind: XKind) -> Classificat
             };
         }
     }
-    match ctx.last_hovered.or(ctx.last_toplevel) {
+    // The hovered window's client opens its menus and tooltips at the pointer; the popups
+    // of other clients go with the keyboard: an input method's candidates, or the focused
+    // window's own lists while the pointer was last on another client's window.
+    let parent = match ctx.last_hovered {
+        Some(Hovered { window, client }) if client == facts.client => Some(window),
+        hovered => ctx.last_toplevel.or(hovered.map(|h| h.window)),
+    };
+    match parent {
         Some(parent) => Classification {
             kind,
             role: Role::Popup { parent },
@@ -257,6 +265,13 @@ mod tests {
 
     fn role_of(f: &WindowFacts, c: &ClassifyContext) -> Role {
         classify(f, c).role
+    }
+
+    fn hovered(id: u32) -> Option<Hovered> {
+        Some(Hovered {
+            window: win(id),
+            client: id & !MASK,
+        })
     }
 
     fn panel_ctx(window: u32, client: u32) -> PanelContext {
@@ -534,7 +549,7 @@ mod tests {
     fn popup_parents() {
         let popup = facts(A | 5).or();
         let c = ClassifyContext {
-            last_hovered: Some(win(A | 1)),
+            last_hovered: hovered(A | 1),
             last_toplevel: Some(win(A | 2)),
             ..ctx()
         };
@@ -568,6 +583,32 @@ mod tests {
         );
     }
 
+    // The hovered window is the parent of its client's popups only; another client's go to
+    // the last toplevel, the hovered window when there is none.
+    #[test]
+    fn popup_parents_by_client() {
+        let c = ClassifyContext {
+            last_hovered: hovered(A | 1),
+            last_toplevel: Some(win(B | 1)),
+            ..ctx()
+        };
+        let candidates = facts(C | 1).or().class("fcitx");
+        assert_eq!(
+            role_of(&facts(A | 5).or(), &c),
+            Role::Popup { parent: win(A | 1) }
+        );
+        assert_eq!(
+            role_of(&facts(B | 5).or(), &c),
+            Role::Popup { parent: win(B | 1) }
+        );
+        assert_eq!(role_of(&candidates, &c), Role::Popup { parent: win(B | 1) });
+        let c = ClassifyContext {
+            last_toplevel: None,
+            ..c
+        };
+        assert_eq!(role_of(&candidates, &c), Role::Popup { parent: win(A | 1) });
+    }
+
     // Rule 11 / upstream #494: OR never; WM_TAKE_FOCUS → TakeFocus; input true → SetInput.
     #[test]
     fn popup_focus_on_map() {
@@ -596,7 +637,7 @@ mod tests {
     fn popups_under_an_open_panel() {
         let c = ClassifyContext {
             panel: Some(panel_ctx(A | 3, A)),
-            last_hovered: Some(win(A | 1)),
+            last_hovered: hovered(A | 1),
             ..ctx()
         };
         assert_eq!(
