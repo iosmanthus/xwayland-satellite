@@ -123,6 +123,9 @@ pub enum XKind {
     /// A7's no-input clause: a frameless transient UTILITY window with WM_HINTS input false
     /// (WeChat's Moments bubble).
     NoInputHelper,
+    /// A frameless transient UTILITY window that takes input and asks for a position of its
+    /// own (USPosition or PPosition): a panel its client places (DingTalk's avatar menu).
+    PlacedPanel,
 }
 
 impl XKind {
@@ -133,7 +136,10 @@ impl XKind {
 
     /// Today's `role.is_fixed_size()`: a toplevel of this kind keeps its client's size.
     pub fn is_fixed_size(self) -> bool {
-        matches!(self, XKind::Splash | XKind::Notification | XKind::CallBar)
+        matches!(
+            self,
+            XKind::Splash | XKind::Notification | XKind::CallBar | XKind::PlacedPanel
+        )
     }
 }
 

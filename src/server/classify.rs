@@ -58,6 +58,14 @@ pub fn x_kind(facts: &WindowFacts) -> XKind {
         {
             XKind::NoInputHelper
         }
+        // A frameless helper for another window that takes input and asks for a place of its
+        // own (DingTalk's avatar menu): X window managers keep a USPosition, so its client
+        // places it, as a panel. As a toplevel, niri put it in the middle of the screen.
+        Some(NetWmType::Utility)
+            if facts.transient_for.is_some() && facts.motif.no_decorations() && positioned =>
+        {
+            XKind::PlacedPanel
+        }
         _ => guessed,
     }
 }
@@ -95,7 +103,7 @@ pub fn classify(facts: &WindowFacts, ctx: &ClassifyContext) -> Classification {
         };
     }
     match kind {
-        XKind::Notification | XKind::CallBar => notification(facts, ctx, kind),
+        XKind::Notification | XKind::CallBar | XKind::PlacedPanel => notification(facts, ctx, kind),
         XKind::Popup | XKind::NoInputHelper => popup(facts, ctx, kind),
         XKind::Toplevel | XKind::Splash => Classification {
             kind,
@@ -121,15 +129,21 @@ fn notification(facts: &WindowFacts, ctx: &ClassifyContext, kind: XKind) -> Clas
     let overlay = ctx.centre_overlay.or(ctx.fallback_overlay);
     let hints_allow =
         matches!(facts.input, InputHint::Absent | InputHint::True) || facts.take_focus;
-    if kind == XKind::Notification && !facts.override_redirect && hints_allow {
+    let panel_kind = matches!(kind, XKind::Notification | XKind::PlacedPanel);
+    if panel_kind && !facts.override_redirect && hints_allow {
         // Transient for a window, or opened by a click in another window of its client
-        // (Feishu closes its panels the moment they lose focus).
-        let anchor = match facts.transient_for {
-            Some(_) => ctx.transient_parent,
-            None => ctx
-                .recent_press
+        // (Feishu closes its panels the moment they lose focus). A placed panel whose
+        // transient parent leads nowhere usable (Qt's never-mapped client leader) goes with
+        // the click too; a notification keeps to its transient parent.
+        let pressed = || {
+            ctx.recent_press
                 .filter(|p| p.window != facts.window && p.client == facts.client)
-                .map(|p| p.role),
+                .map(|p| p.role)
+        };
+        let anchor = match (facts.transient_for, ctx.transient_parent) {
+            (Some(_), Some(ParentRole::Unknown) | None) if kind == XKind::PlacedPanel => pressed(),
+            (Some(_), parent) => parent,
+            (None, _) => pressed(),
         };
         match anchor {
             Some(ParentRole::Toplevel(t) | ParentRole::OfToplevel(t)) => {
@@ -823,6 +837,91 @@ mod tests {
         assert_eq!(
             role_of(&notification(A | 3).transient(A | 9), &transient),
             toast
+        );
+    }
+
+    // DingTalk's avatar menu (MainMenuPanelView, 2026-11-27): a frameless Qt::Tool window
+    // that takes input and places itself (USPosition) next to the avatar that was clicked.
+    // Its WM_TRANSIENT_FOR is Qt's never-mapped 1 × 1 client leader, not the main window.
+    fn placed_panel() -> WindowFacts {
+        facts(A | 3)
+            .types(&[Utility, Other, Normal])
+            .transient(A | 9)
+            .no_decor()
+            .position()
+            .min(400, 836)
+            .max(560, 32767)
+            .input(InputHint::True)
+            .take_focus()
+            .class("com.alibabainc.dingtalk")
+    }
+
+    #[test]
+    fn frameless_helpers_that_place_themselves_are_panels() {
+        assert_eq!(kind(placed_panel()), XKind::PlacedPanel);
+        // Not placing itself, framed, or for no other window: a window of its own.
+        let mut unplaced = placed_panel();
+        unplaced.size_hints = Some(SizeHints {
+            position: false,
+            ..unplaced.size_hints.unwrap()
+        });
+        let mut framed = placed_panel();
+        framed.motif.decorations = Some(1);
+        let mut unrelated = placed_panel();
+        unrelated.transient_for = None;
+        for f in [unplaced, framed, unrelated] {
+            assert_eq!(kind(f), XKind::Toplevel);
+        }
+        // Taking no input, it stays a no-input helper (WeChat's Moments bubble).
+        assert_eq!(
+            kind(placed_panel().input(InputHint::False)),
+            XKind::NoInputHelper
+        );
+    }
+
+    #[test]
+    fn placed_panels_go_with_the_window_that_was_clicked() {
+        let pressed = |transient_parent| ClassifyContext {
+            transient_parent,
+            recent_press: Some(RecentPress {
+                window: win(A | 1),
+                client: A,
+                role: ParentRole::Toplevel(win(A | 1)),
+            }),
+            ..on_overlay()
+        };
+        let panel_of = |parent| Classification {
+            kind: XKind::PlacedPanel,
+            role: Role::PanelOf {
+                parent: win(parent),
+            },
+            focus_on_map: FocusOnMap::Panel,
+        };
+        // The transient parent leads nowhere usable (a never-mapped client leader): the
+        // window that was clicked anchors the panel.
+        assert_eq!(
+            class_of(&placed_panel(), &pressed(Some(ParentRole::Unknown))),
+            panel_of(A | 1)
+        );
+        // A transient parent that is a toplevel anchors it.
+        assert_eq!(
+            class_of(
+                &placed_panel(),
+                &pressed(Some(ParentRole::Toplevel(win(A | 5))))
+            ),
+            panel_of(A | 5)
+        );
+        // Nothing to anchor it: at its own position on the overlay, without focus.
+        let alone = ClassifyContext {
+            transient_parent: Some(ParentRole::Unknown),
+            ..on_overlay()
+        };
+        assert_eq!(
+            role_of(&placed_panel(), &alone),
+            Role::OverlayWindow {
+                output: O1,
+                panel: false
+            }
         );
     }
 
