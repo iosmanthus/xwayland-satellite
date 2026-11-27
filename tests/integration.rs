@@ -1285,6 +1285,99 @@ fn copy_from_x11() {
 }
 
 #[test]
+fn copy_from_x11_with_many_targets() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+    let targets: Vec<x::Atom> = (0..300)
+        .map(|n| {
+            connection
+                .get_reply(&x::InternAtom {
+                    only_if_exists: false,
+                    name: format!("many/target-{n}").as_bytes(),
+                })
+                .atom()
+        })
+        .collect();
+
+    connection.set_selection_owner(window, connection.atoms.clipboard);
+    let request = connection.await_selection_request();
+    assert_eq!(request.target(), connection.atoms.targets);
+    connection.set_property(
+        request.requestor(),
+        x::ATOM_ATOM,
+        request.property(),
+        &targets,
+    );
+    connection.send_selection_notify(&request);
+    f.wait_and_dispatch();
+
+    let mimes = f.testwl.data_source_mimes();
+    assert_eq!(mimes.len(), 300, "advertised mimes: {mimes:?}");
+    assert!(mimes.contains(&"many/target-299".to_string()));
+}
+
+#[test]
+fn a_stalled_wayland_source_is_refused() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.get_selection_owner_change_events(true, window);
+    f.map_as_toplevel(&mut connection, window);
+    f.testwl
+        .create_data_offer_that_holds(vec!["text/plain".into()]);
+    connection.await_selection_owner_change();
+    connection.get_selection_owner_change_events(false, window);
+    let text = connection
+        .get_reply(&x::InternAtom {
+            only_if_exists: false,
+            name: b"text/plain",
+        })
+        .atom();
+    let dest = connection
+        .get_reply(&x::InternAtom {
+            only_if_exists: false,
+            name: b"dest",
+        })
+        .atom();
+
+    let convert = |connection: &Connection, target| {
+        connection
+            .send_and_check_request(&x::ConvertSelection {
+                requestor: window,
+                selection: connection.atoms.clipboard,
+                target,
+                property: dest,
+                time: x::CURRENT_TIME,
+            })
+            .unwrap();
+    };
+    convert(&connection, text);
+    // The source never sends: after the idle timeout (5 s) the read is refused.
+    let started = std::time::Instant::now();
+    let notify = loop {
+        f.wait_and_dispatch();
+        if let Some(xcb::Event::X(x::Event::SelectionNotify(notify))) =
+            connection.poll_for_event().unwrap()
+        {
+            break notify;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "no answer to the read"
+        );
+    };
+    assert_eq!(notify.target(), text);
+    assert_eq!(notify.property(), x::ATOM_NONE, "the read was not refused");
+
+    // The satellite still serves reads.
+    convert(&connection, connection.atoms.targets);
+    let notify = connection.await_selection_notify();
+    assert_eq!(notify.property(), dest);
+}
+
+#[test]
 fn copy_from_wayland() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);

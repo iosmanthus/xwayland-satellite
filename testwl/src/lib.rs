@@ -278,6 +278,8 @@ struct State {
     tablet_tool: Option<ZwpTabletToolV2>,
     configure_serial: u32,
     clipboard: Option<WlDataSource>,
+    /// The fds of reads of a holding offer (`create_data_offer_that_holds`).
+    held_transfers: Vec<OwnedFd>,
     primary: Option<ZwpPrimarySelectionSourceV1>,
     data_device_man: Option<WlDataDeviceManager>,
     data_device: Option<WlDataDevice>,
@@ -310,6 +312,7 @@ impl Default for State {
             tablet_tool: None,
             configure_serial: 0,
             clipboard: None,
+            held_transfers: Vec::new(),
             primary: None,
             primary_man: None,
             primary_device: None,
@@ -809,6 +812,30 @@ impl Server {
             .unwrap();
         dev.data_offer(&offer);
         for mime in mimes {
+            offer.offer(mime);
+        }
+        dev.selection(Some(&offer));
+        self.display.flush_clients().unwrap();
+    }
+
+    /// A clipboard offer of `mime_types` whose reads get no data: their fds stay open, as with a
+    /// source that stops sending.
+    #[track_caller]
+    pub fn create_data_offer_that_holds(&mut self, mime_types: Vec<String>) {
+        let Some(dev) = &self.state.data_device else {
+            panic!("No data device created");
+        };
+        if let Some(selection) = self.state.clipboard.take() {
+            selection.cancelled();
+        }
+        let offer = self
+            .client
+            .as_ref()
+            .unwrap()
+            .create_resource::<WlDataOffer, _, State>(&self.dh, 3, HoldingOffer)
+            .unwrap();
+        dev.data_offer(&offer);
+        for mime in mime_types {
             offer.offer(mime);
         }
         dev.selection(Some(&offer));
@@ -1320,6 +1347,27 @@ impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
 
                 TransferFd::from(fd).write_all(&data[pos].data).unwrap();
             }
+            wl_data_offer::Request::Destroy => {}
+            other => todo!("unhandled request: {other:?}"),
+        }
+    }
+}
+
+/// User data of an offer whose reads get no data.
+struct HoldingOffer;
+
+impl Dispatch<WlDataOffer, HoldingOffer> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &WlDataOffer,
+        request: <WlDataOffer as Resource>::Request,
+        _: &HoldingOffer,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_data_offer::Request::Receive { fd, .. } => state.held_transfers.push(fd),
             wl_data_offer::Request::Destroy => {}
             other => todo!("unhandled request: {other:?}"),
         }

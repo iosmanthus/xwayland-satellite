@@ -15,8 +15,10 @@ use smithay_client_toolkit::primary_selection::PrimarySelectionManagerState;
 use smithay_client_toolkit::primary_selection::device::PrimarySelectionDevice;
 use smithay_client_toolkit::primary_selection::offer::PrimarySelectionOffer;
 use smithay_client_toolkit::primary_selection::selection::PrimarySelectionSource;
-use std::io::Read;
+use std::io::{self, Read};
+use std::os::fd::AsFd;
 use std::rc::{Rc, Weak};
+use std::time::Duration;
 
 pub(super) struct SelectionStates<S: X11Selection> {
     clipboard: Option<SelectionState<S, Clipboard>>,
@@ -151,18 +153,53 @@ pub struct ForeignSelection<T: SelectionType> {
     inner: T::Offer,
 }
 
+/// How long a read of a Wayland selection waits for more data before it gives up: an X11 client
+/// waits for the read, so a source that stops sending must not hold it forever.
+const RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[allow(private_bounds)]
 impl<T: SelectionType> ForeignSelection<T> {
     pub(crate) fn receive(
         &self,
         mime_type: String,
         state: &ServerState<impl XConnection>,
-    ) -> Vec<u8> {
-        let mut pipe = T::receive_offer(&self.inner, mime_type).unwrap();
-        state.queue.flush().unwrap();
-        let mut data = Vec::new();
-        pipe.read_to_end(&mut data).unwrap();
-        data
+    ) -> io::Result<Vec<u8>> {
+        let pipe = T::receive_offer(&self.inner, mime_type)?;
+        state.queue.flush().map_err(io::Error::other)?;
+        read_until_idle(pipe, RECEIVE_IDLE_TIMEOUT)
+    }
+}
+
+/// Everything until EOF, as long as no `idle` time passes without data.
+fn read_until_idle(mut pipe: ReadPipe, idle: Duration) -> io::Result<Vec<u8>> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+    rustix::io::ioctl_fionbio(pipe.as_fd(), true)?;
+    let timeout = Timespec::try_from(idle).map_err(io::Error::other)?;
+    let mut data = Vec::new();
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        let mut fds = [PollFd::new(&pipe, PollFlags::IN)];
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("no data for {idle:?}"),
+                ));
+            }
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(err) => return Err(err.into()),
+        }
+        match pipe.read(&mut chunk) {
+            Ok(0) => return Ok(data),
+            Ok(n) => data.extend_from_slice(&chunk[..n]),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
+            Err(err) => return Err(err),
+        }
     }
 }
 
