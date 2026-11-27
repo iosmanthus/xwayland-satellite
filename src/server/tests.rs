@@ -2407,6 +2407,89 @@ fn panel_moves_are_the_clients() {
     assert_eq!(f.connection().set_window_dims_counter, written);
 }
 
+// The same for a panel its client places and drags (DingTalk's profile card): pointer
+// positions in it follow the pointer's relative motion, not the popup that the compositor
+// moves after X. The card's drag places it at the pointer, so positions taken from the
+// lagging popup made each step overshoot, and the card ran away across the screen.
+#[test]
+fn panel_pointer_moves_with_the_hand() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let man = f
+        .relative_pointer_man
+        .take()
+        .expect("No relative pointer manager");
+    let _relative = TestObject::<ZwpRelativePointerV1>::from_request(
+        &man.obj,
+        zwp_relative_pointer_manager_v1::Request::GetRelativePointer {
+            pointer: pointer.obj.clone(),
+        },
+    );
+    new_overlay_output(&mut f, 0, 0);
+    let (_main, _main_id, _meeting, panel, _panel_surface) = panel_over_meeting(&mut f, &comp);
+    let panel_id = f.testwl.last_created_surface_id().unwrap();
+    let dims = f.connection().windows[&panel].dims;
+
+    let run = |f: &mut TestFixture<FakeXConnection>| {
+        f.run();
+        f.run();
+        f.run();
+        std::mem::take(&mut *pointer.data.events.lock().unwrap())
+    };
+    let motions = |events: &[wl_pointer::Event]| {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                wl_pointer::Event::Motion {
+                    surface_x,
+                    surface_y,
+                    ..
+                } => Some((*surface_x, *surface_y)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let surface = f.testwl.get_surface_data(panel_id).unwrap().surface.clone();
+    f.testwl.pointer().enter(1, &surface, 10.0, 10.0);
+    f.testwl.pointer().motion(1, 10.0, 10.0);
+    f.testwl.pointer().frame();
+    let events = run(&mut f);
+    let enter = events.iter().find_map(|event| match event {
+        wl_pointer::Event::Enter {
+            surface_x,
+            surface_y,
+            ..
+        } => Some((*surface_x, *surface_y)),
+        _ => None,
+    });
+    assert_eq!(enter, Some((20.0, 20.0)));
+
+    // Moved 6 left in X: the compositor gives the pointer where it was in the popup, then
+    // (once the popup has moved) 3 further in.
+    f.reconfigure_window(
+        panel,
+        WindowDims {
+            x: dims.x - 6,
+            ..dims
+        },
+        false,
+    );
+    for x in [10.0, 13.0] {
+        f.testwl.pointer().motion(2, x, 10.0);
+        f.testwl.pointer().frame();
+    }
+    assert_eq!(motions(&run(&mut f)), vec![]);
+
+    // The pointer moves 2 right.
+    f.testwl.pointer().motion(3, 15.0, 10.0);
+    f.testwl.relative_motion(2.0, 0.0);
+    f.testwl.pointer().frame();
+    assert_eq!(motions(&run(&mut f)), vec![(30.0, 20.0)]);
+}
+
 // A popup nested in another popup (rule 11: Feishu's combo bubble inside its panel) is
 // repositioned relative to its xdg parent, as `create_popup` placed it, not relative to
 // its output.

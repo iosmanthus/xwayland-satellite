@@ -408,8 +408,9 @@ pub(super) fn pointer_offset(world: &World, entity: Entity) -> (f64, f64) {
     )
 }
 
-/// Where the pointer is, in X's coordinates, while it is in an overlay popup: where it
-/// entered, moved by its relative motion since. A component of the pointer's entity.
+/// Where the pointer is, in X's coordinates, while it is in a popup its client places (an
+/// overlay popup or a `ClientPlaced` panel): where it entered, moved by its relative motion
+/// since. A component of the pointer's entity.
 ///
 /// Pointer positions the compositor gives in a popup are from where it has the popup, which
 /// is behind where X has the window while its client moves it, and it gives new ones as the
@@ -427,8 +428,9 @@ pub(super) struct HasRelativeMotion;
 pub(super) struct RelativeOf(pub(super) Entity);
 
 /// The pointer's position in X as it enters `surface` at `x`, `y` (in the window, in X's
-/// pixels), if it goes by relative motion there: it is an overlay popup, and satellite gets
-/// relative motion for the pointer.
+/// pixels), if it goes by relative motion there: it is a popup its client places and moves
+/// (an overlay popup, or a `ClientPlaced` panel of a toplevel), and satellite gets relative
+/// motion for the pointer.
 pub(super) fn overlay_pointer(
     world: &World,
     pointer: Entity,
@@ -441,8 +443,13 @@ pub(super) fn overlay_pointer(
     {
         return None;
     }
-    let mut query = world.query_one::<(&Placement, &WindowData)>(surface).ok()?;
-    let (_, window) = query.get()?;
+    let client_placed = world
+        .satisfies::<hecs::Or<&Placement, &super::ClientPlaced>>(surface)
+        .unwrap_or(false);
+    if !client_placed {
+        return None;
+    }
+    let window = world.get::<&WindowData>(surface).ok()?;
     Some(OverlayPointer {
         x: f64::from(window.attrs.dims.x) + x,
         y: f64::from(window.attrs.dims.y) + y,
