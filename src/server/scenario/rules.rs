@@ -217,7 +217,7 @@ fn rule10_references() {
 }
 
 /// Rule 11 (upstream #494): override-redirect popups never take focus; WM_TAKE_FOCUS ones
-/// are offered it; input-true ones get it.
+/// are offered it; input-true ones get it (Locally Active ones: both).
 #[test]
 fn rule11_popups_at_first_configure() {
     let mut s = Scenario::new("design §2.1 rule 11");
@@ -226,10 +226,19 @@ fn rule11_popups_at_first_configure() {
     s.map(
         facts(A | 11)
             .guessed(WindowRole::Popup)
+            .input(InputHint::False)
             .take_focus()
             .at(10, 10, 50, 50),
     )
     .expect(&[xf_take(win(A | 11))]);
+    s.map(
+        facts(A | 12)
+            .guessed(WindowRole::Popup)
+            .input(InputHint::True)
+            .take_focus()
+            .at(10, 10, 50, 50),
+    )
+    .expect(&[xf_set_take(win(A | 12))]);
     s.map(menu(MENU)).expect(&[xf(win(MENU))]);
 }
 

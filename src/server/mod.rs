@@ -906,9 +906,12 @@ impl<C: XConnection> ServerState<C> {
             } => self.connection.send_take_focus(window),
             XFocusChange::Window {
                 window,
-                method: Method::SetInput,
+                method,
                 primary_output,
             } => {
+                if method == Method::SetInputAndTakeFocus {
+                    self.connection.send_take_focus(window);
+                }
                 // An output not known yet keeps the primary as it is (rule 13).
                 let name = primary_output
                     .and_then(|output| self.output_name(output))

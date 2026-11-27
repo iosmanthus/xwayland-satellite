@@ -3540,7 +3540,18 @@ fn popup_send_take_focus_when_advertised() {
         let (mut f, comp) = TestFixture::new_with_compositor();
 
         let (win_toplevel, win_popup) = f.setup_popup_focus_case(&comp, false, accepts_input, true);
-        assert_eq!(f.connection().focused_window, Some(win_toplevel));
+        // ICCCM: a Locally Active popup (input true) is also given the focus, a Globally
+        // Active one (input false) takes it itself.
+        let focused = if accepts_input {
+            win_popup
+        } else {
+            win_toplevel
+        };
+        assert_eq!(
+            f.connection().focused_window,
+            Some(focused),
+            "accepts_input={accepts_input}"
+        );
         assert_eq!(f.connection().send_take_focus_window, Some(win_popup));
     }
 }

@@ -216,6 +216,10 @@ pub fn xf_take(window: x::Window) -> Output {
     focus(window, Method::TakeFocus, None)
 }
 
+pub fn xf_set_take(window: x::Window) -> Output {
+    focus(window, Method::SetInputAndTakeFocus, None)
+}
+
 // No app or rule fixture needs a WM_TAKE_FOCUS window on the overlay (fixtures.md).
 #[allow(dead_code)]
 pub fn xf_take_on(window: x::Window, output: OutputId) -> Output {

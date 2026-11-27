@@ -394,13 +394,15 @@ fn upstream_494_popups() {
             .at(10, 20, 100, 50),
     )
     .expect(&[]);
+    // Unity's Add Component popup (#494): input true and WM_TAKE_FOCUS.
     s.map(
         facts(A | 31)
             .guessed(WindowRole::Popup)
+            .input(InputHint::True)
             .take_focus()
             .at(10, 20, 100, 50),
     )
-    .expect(&[xf_take(win(A | 31))]);
+    .expect(&[xf_set_take(win(A | 31))]);
 }
 
 /// Unity editor's add-component search (#397): a popup that needs keys (input true) is

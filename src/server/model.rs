@@ -336,7 +336,9 @@ pub enum Event {
 pub enum Method {
     /// `focus_window`: SetInputFocus, `_NET_ACTIVE_WINDOW`, WM_STATE, RandR primary.
     SetInput,
-    /// WM_TAKE_FOCUS only.
+    /// WM_TAKE_FOCUS, then as `SetInput` (ICCCM's Locally Active input model).
+    SetInputAndTakeFocus,
+    /// WM_TAKE_FOCUS only (ICCCM's Globally Active input model).
     TakeFocus,
 }
 

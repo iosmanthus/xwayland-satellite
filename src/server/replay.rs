@@ -1376,6 +1376,7 @@ mod allowance_tests {
             b.old = vec![match method {
                 Method::SetInput => input(5),
                 Method::TakeFocus => FocusCall::TakeFocus(win(5)),
+                Method::SetInputAndTakeFocus => unreachable!("not one of the cases"),
             }];
             b.new = vec![XFocusChange::Window {
                 window: win(5),

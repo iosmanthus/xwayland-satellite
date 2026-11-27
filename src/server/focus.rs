@@ -57,13 +57,19 @@ pub fn focusable(roles: &RoleTable, w: x::Window) -> bool {
 }
 
 /// How X is told to focus `w`. Toplevels always get SetInputFocus, as they always have
-/// from a keyboard enter; the rest are offered WM_TAKE_FOCUS when they advertise it (Q1).
+/// from a keyboard enter (Q1). The rest are offered WM_TAKE_FOCUS when they advertise it,
+/// and get SetInputFocus as well unless their WM_HINTS input is false: ICCCM 4.1.7's Locally
+/// Active model asks the window manager to set the focus, and Qt does not take the focus on
+/// WM_TAKE_FOCUS. Only a Globally Active window takes the focus itself. wlroots does the same.
 pub fn method(roles: &RoleTable, w: x::Window) -> Method {
     match roles.entry(w) {
         Some(entry) if entry.classification.is_some_and(|c| c.role.is_toplevel()) => {
             Method::SetInput
         }
-        Some(entry) if entry.facts.take_focus => Method::TakeFocus,
+        Some(entry) if entry.facts.take_focus && entry.facts.input == InputHint::False => {
+            Method::TakeFocus
+        }
+        Some(entry) if entry.facts.take_focus => Method::SetInputAndTakeFocus,
         _ => Method::SetInput,
     }
 }
@@ -568,8 +574,23 @@ mod tests {
             .facts
             .take_focus = true;
         assert_eq!(method(&t.roles, win(MAIN)), Method::SetInput);
-        assert_eq!(method(&t.roles, win(PANEL)), Method::TakeFocus);
         assert_eq!(method(&t.roles, win(POPUP)), Method::SetInput);
+    }
+
+    // ICCCM 4.1.7 (as wlroots does): a window that advertises WM_TAKE_FOCUS is offered it,
+    // and given the focus unless its WM_HINTS input is false (Locally vs Globally Active).
+    #[test]
+    fn method_follows_the_input_model() {
+        let mut t = world();
+        let mut panel = |input| {
+            let facts = &mut t.roles.windows.get_mut(&win(PANEL)).unwrap().facts;
+            facts.take_focus = true;
+            facts.input = input;
+            method(&t.roles, win(PANEL))
+        };
+        assert_eq!(panel(InputHint::True), Method::SetInputAndTakeFocus);
+        assert_eq!(panel(InputHint::Absent), Method::SetInputAndTakeFocus);
+        assert_eq!(panel(InputHint::False), Method::TakeFocus);
     }
 
     #[test]
@@ -729,16 +750,13 @@ mod tests {
         assert_eq!(t.fs.last_toplevel, Some(win(MEETING)));
     }
 
-    // Rule 3: TakeFocus when advertised.
+    // Rule 3: TakeFocus when advertised (here by a Globally Active panel).
     #[test]
     fn rule3_panel_with_take_focus() {
         let mut t = world();
-        t.roles
-            .windows
-            .get_mut(&win(PANEL))
-            .unwrap()
-            .facts
-            .take_focus = true;
+        let facts = &mut t.roles.windows.get_mut(&win(PANEL)).unwrap().facts;
+        facts.take_focus = true;
+        facts.input = InputHint::False;
         let out = t.ev(&[
             mapped(
                 PANEL,
