@@ -432,22 +432,29 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         dest_property: x::Atom,
         server_state: &mut RealServerState,
     ) {
-        let reply = match connection.wait_for_reply(connection.send_request(&x::GetProperty {
-            delete: true,
-            window: wm_window,
-            property: dest_property,
-            r#type: x::ATOM_ATOM,
-            long_offset: 0,
-            long_length: 20,
-        })) {
-            Ok(reply) => reply,
-            Err(e) => {
-                warn!("Could not obtain target list: {e:?}");
-                return;
+        // All of the list, in parts (the property is deleted with the last one).
+        let mut targets: Vec<x::Atom> = Vec::new();
+        loop {
+            let reply = match connection.wait_for_reply(connection.send_request(&x::GetProperty {
+                delete: true,
+                window: wm_window,
+                property: dest_property,
+                r#type: x::ATOM_ATOM,
+                long_offset: targets.len() as u32,
+                long_length: 256,
+            })) {
+                Ok(reply) => reply,
+                Err(e) => {
+                    warn!("Could not obtain target list: {e:?}");
+                    return;
+                }
+            };
+            targets.extend_from_slice(reply.value());
+            if reply.bytes_after() == 0 || reply.value::<x::Atom>().is_empty() {
+                break;
             }
-        };
-
-        let targets: &[x::Atom] = reply.value();
+        }
+        let targets = targets.as_slice();
         if targets.is_empty() {
             warn!("Got empty selection target list, trying again...");
             match connection.wait_for_reply(connection.send_request(&x::GetSelectionOwner {
@@ -575,7 +582,13 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                 .as_ref()
                 .cloned()
                 .unwrap_or_else(|| target.name.clone());
-            let data = inner.receive(mime_name, server_state);
+            let data = match inner.receive(mime_name.clone(), server_state) {
+                Ok(data) => data,
+                Err(e) => {
+                    warn!("Could not read the selection as {mime_name}: {e}");
+                    return false;
+                }
+            };
             if data.len() > max_req_bytes {
                 if let Err(e) = connection.send_and_check_request(&x::ChangeWindowAttributes {
                     window: request.requestor(),
