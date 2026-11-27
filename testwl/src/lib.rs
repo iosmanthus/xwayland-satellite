@@ -478,6 +478,20 @@ impl State {
         }
     }
 
+    /// Configures a popup at `x`, `y` rather than at its positioner's offset, as a
+    /// compositor does that slides or flips a popup to keep it on the screen.
+    #[track_caller]
+    fn configure_popup_at(&mut self, surface_id: SurfaceId, x: i32, y: i32) {
+        let surface = self.surfaces.get_mut(&surface_id).unwrap();
+        let Some(SurfaceRole::Popup(p)) = &mut surface.role else {
+            panic!("Surface does not have popup role: {:?}", surface.role);
+        };
+        let size = p.positioner_state.size.unwrap();
+        p.popup.configure(x, y, size.x, size.y);
+        p.xdg.configure(self.configure_serial);
+        self.configure_serial += 1;
+    }
+
     #[track_caller]
     fn popup_done(&mut self, surface_id: SurfaceId) {
         let surface = self.surfaces.get_mut(&surface_id).unwrap();
@@ -731,6 +745,12 @@ impl Server {
     #[track_caller]
     pub fn configure_popup(&mut self, surface_id: SurfaceId) {
         self.state.configure_popup(surface_id);
+        self.display.flush_clients().unwrap();
+    }
+
+    #[track_caller]
+    pub fn configure_popup_at(&mut self, surface_id: SurfaceId, x: i32, y: i32) {
+        self.state.configure_popup_at(surface_id, x, y);
         self.display.flush_clients().unwrap();
     }
 
@@ -2277,6 +2297,7 @@ pub struct PositionerState {
     pub offset: Vec2,
     pub anchor: xdg_positioner::Anchor,
     pub gravity: xdg_positioner::Gravity,
+    pub constraint_adjustment: xdg_positioner::ConstraintAdjustment,
 }
 
 impl Default for PositionerState {
@@ -2287,6 +2308,7 @@ impl Default for PositionerState {
             offset: Vec2 { x: 0, y: 0 },
             anchor: xdg_positioner::Anchor::None,
             gravity: xdg_positioner::Gravity::None,
+            constraint_adjustment: xdg_positioner::ConstraintAdjustment::empty(),
         }
     }
 }
@@ -2356,7 +2378,13 @@ impl Dispatch<XdgPositioner, ()> for State {
             xdg_positioner::Request::Destroy => {
                 data.remove();
             }
-            xdg_positioner::Request::SetConstraintAdjustment { .. } => {}
+            xdg_positioner::Request::SetConstraintAdjustment {
+                constraint_adjustment,
+            } => {
+                data.get_mut().constraint_adjustment = constraint_adjustment
+                    .into_result()
+                    .unwrap_or(xdg_positioner::ConstraintAdjustment::empty());
+            }
             other => todo!("unhandled positioner request {other:?}"),
         }
     }

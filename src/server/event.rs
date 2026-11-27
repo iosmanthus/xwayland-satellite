@@ -340,6 +340,9 @@ impl SurfaceEvents {
                 // here would move it back, and tell the client of a move it made itself.
                 placed = Some((x, y));
                 drop(query);
+            } else if data.has::<super::ClientPlaced>() {
+                // The same for a panel of a toplevel: X keeps where its client put it.
+                drop(query);
             } else {
                 window_data.attrs.dims = WindowDims {
                     x: x as i16,

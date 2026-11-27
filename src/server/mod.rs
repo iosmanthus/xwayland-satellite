@@ -292,6 +292,12 @@ struct ToplevelData {
     decoration: decoration::DecorationsData,
 }
 
+/// A popup its client places (a `Role::PanelOf` panel): X keeps where the client put it.
+/// The compositor answers each move a while later, maybe after another move; putting the
+/// window where an answer says would move it back, and tell the client of a move it did
+/// not make (`xdg_event`).
+pub(crate) struct ClientPlaced;
+
 #[derive(Debug)]
 struct PopupData {
     popup: XdgPopup,
@@ -1830,8 +1836,19 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             ),
             Some(Err(parent)) => {
                 literal_xdg_parent = Some(parent);
+                let client_placed = matches!(classification.role, Role::PanelOf { .. });
+                if client_placed {
+                    self.world.insert_one(entity, ClientPlaced).unwrap();
+                } else {
+                    let _ = self.world.remove_one::<ClientPlaced>(entity);
+                }
                 (
-                    SurfaceRole::Popup(Some(self.create_popup(entity, xdg_surface, parent))),
+                    SurfaceRole::Popup(Some(self.create_popup(
+                        entity,
+                        xdg_surface,
+                        parent,
+                        client_placed,
+                    ))),
                     false,
                 )
             }
@@ -2047,7 +2064,17 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn create_popup(&mut self, entity: Entity, xdg: XdgSurface, parent: x::Window) -> PopupData {
+    /// An xdg_popup of `parent`'s surface at `entity`'s X position. A popup its client places
+    /// (`client_placed`, a `PanelOf` panel) is not slid onto the screen: it shows where X
+    /// has it, as an X window manager leaves a window its client moves partly off the
+    /// screen.
+    fn create_popup(
+        &mut self,
+        entity: Entity,
+        xdg: XdgSurface,
+        parent: x::Window,
+        client_placed: bool,
+    ) -> PopupData {
         let mut query = self
             .world
             .query_one::<(&WindowData, &mut SurfaceScaleFactor)>(entity)
@@ -2087,8 +2114,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             (parent_window.attrs.dims.width as f64 / initial_scale).ceil() as i32,
             (parent_window.attrs.dims.height as f64 / initial_scale).ceil() as i32,
         );
-        positioner
-            .set_constraint_adjustment(ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY);
+        positioner.set_constraint_adjustment(if client_placed {
+            ConstraintAdjustment::empty()
+        } else {
+            ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY
+        });
         let popup = xdg.get_popup(
             Some(&parent_role.xdg().unwrap().surface),
             &positioner,

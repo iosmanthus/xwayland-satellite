@@ -2342,6 +2342,71 @@ fn panel_moves_when_its_client_moves_it() {
     assert_eq!(data.attrs.dims, grown);
 }
 
+// A panel its client places (`PanelOf`: Feishu's meeting panel, DingTalk's profile card)
+// is shown where the client puts it: the compositor must not slide it back on the screen,
+// as X window managers leave a window the client moves partly off the screen. An ordinary
+// popup (a menu) is still slid onto the screen.
+#[test]
+fn panels_are_not_slid_onto_the_screen() {
+    use wayland_protocols::xdg::shell::server::xdg_positioner::ConstraintAdjustment;
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (_main, _main_id, _meeting, _panel, _panel_surface) = panel_over_meeting(&mut f, &comp);
+    let panel_id = f.testwl.last_created_surface_id().unwrap();
+    let popup = f.testwl.get_surface_data(panel_id).unwrap().popup();
+    assert!(popup.positioner_state.constraint_adjustment.is_empty());
+
+    let mut g = TestFixture::new();
+    let comp = g.compositor();
+    let window = Window::new(1);
+    let (_, window_id) = g.create_toplevel(&comp, window);
+    let (_, menu_id) = g.create_popup(&comp, PopupBuilder::new(Window::new(2), window, window_id));
+    let menu = g.testwl.get_surface_data(menu_id).unwrap().popup();
+    assert_eq!(
+        menu.positioner_state.constraint_adjustment,
+        ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY
+    );
+}
+
+// DingTalk's profile card follows the pointer as the user drags it, one move after the
+// other. A compositor answer at another place (an older move, or one it kept on the
+// screen) must not move the X window: X keeps where the client put it, and the client is
+// not told of a move it did not make. Putting the window there made the card jump between
+// the pointer and the edge of the screen.
+#[test]
+fn panel_moves_are_the_clients() {
+    let mut f = TestFixture::new_pre_connect(|testwl| testwl.enable_layer_shell());
+    let comp = f.compositor();
+    new_overlay_output(&mut f, 0, 0);
+    let (_main, _main_id, _meeting, panel, _panel_surface) = panel_over_meeting(&mut f, &comp);
+    let panel_id = f.testwl.last_created_surface_id().unwrap();
+    let dims = f.connection().windows[&panel].dims;
+    let written = f.connection().set_window_dims_counter;
+
+    let moved = WindowDims {
+        x: dims.x + 400,
+        y: dims.y + 200,
+        ..dims
+    };
+    f.reconfigure_window(
+        panel,
+        WindowDims {
+            x: dims.x + 200,
+            ..dims
+        },
+        false,
+    );
+    f.reconfigure_window(panel, moved, false);
+    f.run();
+    f.testwl.configure_popup_at(panel_id, 10, 20);
+    f.run();
+    f.run();
+
+    assert_eq!(window_dims(&f, panel), moved);
+    assert_eq!(f.connection().set_window_dims_counter, written);
+}
+
 // A popup nested in another popup (rule 11: Feishu's combo bubble inside its panel) is
 // repositioned relative to its xdg parent, as `create_popup` placed it, not relative to
 // its output.
